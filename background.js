@@ -116,10 +116,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "SAVE_GLOSSARY") {
     try {
       parseGlossary(msg.text);
-      chrome.storage.local.set({ glossary: msg.text }).then(() => sendResponse({ ok: true }))
+      chrome.storage.local.set({ glossary: msg.text }).then(() => {
+        clearTranslateCache();   // 术语变了，旧译文缓存全部作废
+        sendResponse({ ok: true });
+      })
         .catch(e => sendResponse({ ok: false, error: e.message }));
     } catch (e) { sendResponse({ ok: false, error: e.message }); }
     return true;
+  }
+  if (msg?.type === "ADD_TERM") {
+    addGlossaryTerm(msg.source, msg.result)
+      .then(r => sendResponse({ ok: true, ...r }))
+      .catch(e => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+  if (msg?.type === "SAVE_VOCAB") {
+    saveVocabEntry(msg.entry)
+      .then(r => sendResponse({ ok: true, ...r }))
+      .catch(e => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+  if (msg?.type === "VOCAB_DELETE") {
+    modifyVocab(list => list.filter(v => !v || v.id !== msg.id))
+      .then(() => sendResponse({ ok: true }))
+      .catch(e => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+  if (msg?.type === "VOCAB_CLEAR") {
+    chrome.storage.local.set({ vocab: [] }).then(() => sendResponse({ ok: true }))
+      .catch(e => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+  if (msg?.type === "PAGE_STATE") {
+    // 整页翻译开始/还原：工具栏图标加「译」徽章，只对该标签页生效
+    if (sender.tab && sender.tab.id) setTabBadge(sender.tab.id, msg.active ? "译" : "");
+    sendResponse({ ok: true });
+    return false;
   }
   if (["DRAFT_REPLY", "CHECK_TRANSLATION", "EXTRACT_OFFER"].includes(msg?.type)) {
     handleWritingTask(msg).then(result => sendResponse({ ok: true, result }))
@@ -305,6 +337,193 @@ function showNotification(title, message) {
   }
 }
 
+/* ---------- 用量统计（仅本地）：每月重置，翻译请求经过才计数 ---------- */
+const USAGE_KEY = "usage";
+async function bumpUsage(chars, reqs) {
+  try {
+    const now = new Date();
+    const month = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
+    const obj = await chrome.storage.local.get(USAGE_KEY);
+    const u = obj && obj[USAGE_KEY];
+    const next = u && u.month === month
+      ? { month, chars: (u.chars || 0) + chars, reqs: (u.reqs || 0) + reqs }
+      : { month, chars, reqs };
+    await chrome.storage.local.set({ [USAGE_KEY]: next });
+  } catch (e) { /* 统计失败不影响翻译 */ }
+}
+
+/* ---------- 译文缓存：同一文本不重翻、不重计费。术语变更时整体作废 ---------- */
+const TCACHE_KEY = "tcache";
+const TCACHE_MAX = 500;   // 条目上限，避免长期膨胀
+let tcache = new Map();
+let tcacheHydrated = false;
+let tcacheFlushTimer = 0;
+chrome.storage.local.get(TCACHE_KEY).then(obj => {
+  const data = obj && obj[TCACHE_KEY];
+  tcache = new Map(Array.isArray(data) ? data : []);
+  tcacheHydrated = true;
+}).catch(() => { tcache = new Map(); });
+
+function fnv1a(text) {
+  let h = 0x811c9dc5;
+  const s = String(text);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+const translationCacheKey = (engine, target, scene, text) =>
+  "v1::" + engine + "::" + target + "::" + (scene || "") + "::" + fnv1a(text) + "::" + String(text).length;
+
+function cacheGet(key) {
+  if (!tcacheHydrated) return undefined;
+  const hit = tcache.get(key);
+  if (hit === undefined) return undefined;
+  tcache.delete(key);   // 重新插入，MRU 语义
+  tcache.set(key, hit);
+  return hit;
+}
+
+async function cachePut(key, value) {
+  if (!value || !tcacheHydrated) return;
+  try {
+    tcache.set(key, value);
+    while (tcache.size > TCACHE_MAX) tcache.delete(tcache.keys().next().value);
+    if (!tcacheFlushTimer && typeof setTimeout === "function") {
+      tcacheFlushTimer = setTimeout(flushTcache, 2000);
+    }
+  } catch (e) { /* 缓存写入失败不影响翻译 */ }
+}
+
+function flushTcache() {
+  tcacheFlushTimer = 0;
+  try { chrome.storage.local.set({ [TCACHE_KEY]: [...tcache] }); } catch (e) {}
+}
+
+function clearTranslateCache() {
+  tcache = new Map();
+  tcacheHydrated = true;
+  if (tcacheFlushTimer) { clearTimeout(tcacheFlushTimer); tcacheFlushTimer = 0; }
+  try { chrome.storage.local.set({ [TCACHE_KEY]: [] }); } catch (e) {}
+}
+
+const hasCJKBG = (s) => /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/.test(String(s || ""));
+
+/* ---------- 浏览器内置引擎（Chrome 138+ on-device Translator，实验） ----------
+ * 设备端、免费、离线；不可用时如实报错，不静默换引擎。 */
+const BROWSER_LANGS = { "zh-CN": "zh", "zh-TW": "zh-TW", "en": "en" };
+
+async function browserTranslateBG(text, target) {
+  if (typeof Translator === "undefined") {
+    throw new Error("当前 Chrome 不支持浏览器内置翻译（需 138+ 且在设置中开启翻译功能）");
+  }
+  const tgt = BROWSER_LANGS[target] || target;
+  const src = hasCJKBG(text) ? "zh" : "en";
+  if (src === tgt) return text;
+  let availability = "";
+  try {
+    availability = await Translator.availability({ sourceLanguage: src, targetLanguage: tgt });
+  } catch (e) {
+    throw new Error("浏览器内置翻译不可用：" + (e.message || e));
+  }
+  if (availability === "unavailable") {
+    throw new Error("浏览器内置翻译不支持该语言方向（" + src + " → " + tgt + "），请改用 Google 或 AI 引擎");
+  }
+  const translator = await Translator.create({ sourceLanguage: src, targetLanguage: tgt });
+  bumpUsage(text.length, 1);   // 设备端免费，但如实计入本地用量统计
+  const out = await translator.translate(text);
+  return String(out);
+}
+
+/* ---------- 术语闭环：从译文预览一键存术语 ---------- */
+async function addGlossaryTerm(source, result) {
+  const a = String(source || "").trim();
+  const b = String(result || "").trim();
+  if (!a || !b) throw new Error("原文与译文都不能为空");
+  if (/[\r\n=]/.test(a) || /[\r\n=]/.test(b)) throw new Error("术语不能包含换行或等号，请先精简成固定译法");
+  const aZh = hasCJKBG(a), bZh = hasCJKBG(b);
+  if (aZh === bZh) throw new Error("需要一边是中文、一边是英文才能存为术语");
+  if (a.length > 80 || b.length > 80) throw new Error("术语两侧各最多 80 字符，过长的内容不适合做固定译法");
+  const zh = aZh ? a : b, en = aZh ? b : a;
+  const obj = await chrome.storage.local.get("glossary");
+  const text = String(obj.glossary || "");
+  const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length >= 100) throw new Error("术语表已满（100 条），请先删掉不用的条目");
+  const line = zh + " = " + en;
+  let action = "added", index = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const [lhs, rhs] = lines[i].split("=").map(s => s.trim());
+    if (lhs === zh) { index = i; break; }
+  }
+  if (index >= 0) {
+    if (lines[index] === line) return { action: "duplicate", count: lines.length, line };
+    lines[index] = line;   // 同一中文已有译法 → 更新，不新增
+    action = "updated";
+  } else {
+    lines.push(line);
+  }
+  const next = lines.join("\n");
+  if (next.length > 12000) throw new Error("超出术语表 12000 字符上限");
+  await chrome.storage.local.set({ glossary: next });
+  clearTranslateCache();
+  return { action, count: lines.length, line };
+}
+
+/* ---------- 生词本：划词收藏原文与译文，仅存本机 ---------- */
+const VOCAB_MAX = 500;
+
+async function modifyVocab(mutate) {
+  const obj = await chrome.storage.local.get("vocab");
+  const list = Array.isArray(obj.vocab) ? obj.vocab : [];
+  const next = mutate(list);
+  await chrome.storage.local.set({ vocab: next.slice(0, VOCAB_MAX) });
+  return next.slice(0, VOCAB_MAX);
+}
+
+async function saveVocabEntry(entry) {
+  const text = String(entry?.text || "").trim();
+  const tr = String(entry?.tr || "").trim();
+  if (!text || !tr) throw new Error("收藏内容不完整");
+  if (text.length > 500 || tr.length > 2000) throw new Error("内容过长，不适合收藏为生词");
+  const item = {
+    id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+    text, tr,
+    url: String(entry.url || "").slice(0, 300),
+    title: String(entry.title || "").slice(0, 120),
+    ts: Date.now(),
+  };
+  const list = await modifyVocab(items => {
+    const kept = items.filter(v => v && !(v.text === text && v.tr === tr));
+    kept.unshift(item);   // 最新在前；重复收藏会更新到最上面
+    return kept;
+  });
+  return { count: list.length };
+}
+
+/* ---------- 图标徽章：整页翻译中「译」，有新版本全局红点 ---------- */
+function setTabBadge(tabId, text) {
+  if (!tabId) return;
+  try {
+    chrome.action.setBadgeText({ tabId, text });
+    if (text) {
+      chrome.action.setBadgeBackgroundColor({ tabId, color: "#3355d1" });
+      if (chrome.action.setBadgeTextColor) chrome.action.setBadgeTextColor({ tabId, color: "#ffffff" });
+    }
+  } catch (e) {}
+}
+
+function setUpdateBadge(on) {
+  try {
+    chrome.action.setBadgeText({ text: on ? "•" : "" });
+    if (on) {
+      chrome.action.setBadgeBackgroundColor({ color: "#b42318" });
+      if (chrome.action.setBadgeTextColor) chrome.action.setBadgeTextColor({ color: "#ffffff" });
+    }
+  } catch (e) {}
+}
+
 async function handleExplain() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id) throw new Error("找不到当前标签页");
@@ -437,6 +656,7 @@ async function googleTranslateBG(text, targetLang) {
     "https://translate.googleapis.com/translate_a/single?client=gtx&dt=t" +
     "&sl=auto&tl=" + encodeURIComponent(targetLang) +
     "&q=" + encodeURIComponent(text);
+  bumpUsage(text.length, 1);   // 真实发出请求才计数，缓存命中不经过这里
   const res = await fetch(url);
   if (!res.ok) throw new Error("HTTP " + res.status);
   const data = await res.json();
@@ -476,17 +696,31 @@ async function handleTranslate(msg) {
   const terms = parseGlossary((await chrome.storage.local.get("glossary")).glossary || "");
   const protectedText = protectTerms(text, terms, target);
   const usable = s.provider === "ai" && s.aiApiKey && /^https?:\/\//i.test(s.aiBaseUrl);
+  const browser = s.provider === "browser";
+  const engineTag = usable ? "ai:" + (s.aiModel || "") : browser ? "browser" : "google";
+  // 同文本同引擎直接回缓存：重访/重试不重翻、不重计费
+  const cacheKey = translationCacheKey(engineTag, target, msg.scene, protectedText.text);
+  const hit = cacheGet(cacheKey);
+  if (typeof hit === "string" && hit) return hit;
   // strict：整页翻译用，宁可直接报错，也不让部分段落悄悄退回免费接口
-  if (msg.strict && !usable) throw new Error("整页翻译需要 AI：请在扩展设置里启用 AI 大模型并填写 API Key");
-  if (usable) {
+  if (msg.strict && !usable && !browser) throw new Error("整页翻译需要 AI 或浏览器引擎：请在扩展设置里选择并配置");
+  let out = "";
+  if (browser) {
+    out = await browserTranslateBG(protectedText.text, target);   // 设备端引擎不可用时如实报错
+  } else if (usable) {
     try {
-      return protectedText.restore(await aiTranslateBG(s, protectedText.text, target, msg.scene));
+      out = await aiTranslateBG(s, protectedText.text, target, msg.scene);
     } catch (e) {
       if (msg.strict) throw e;
       console.warn("[中英互译助手] AI 翻译失败，回退 Google：", e.message);
+      out = await googleTranslateBG(protectedText.text, target);
     }
+  } else {
+    out = await googleTranslateBG(protectedText.text, target);
   }
-  return protectedText.restore(await googleTranslateBG(protectedText.text, target));
+  const restored = protectedText.restore(out);
+  if (restored) cachePut(cacheKey, restored);
+  return restored;
 }
 
 /* ---------------- 整页翻译：一批多段 ----------------
@@ -502,9 +736,10 @@ const BLOCKS_MAX_CHARS = 6000;
 
 async function handleTranslateBlocks(msg) {
   const s = normalizeSettings(await chrome.storage.sync.get(["provider", "aiBaseUrl", "aiModel", "aiApiKey"]));
-  // 整页翻译只走 AI：静默退回免费接口会让整页质量参差不齐，宁可直接报错
-  if (s.provider !== "ai" || !s.aiApiKey) throw new Error("整页翻译需要 AI：请在扩展设置里启用 AI 大模型并填写 API Key");
-  if (!/^https?:\/\//i.test(s.aiBaseUrl)) throw new Error("请检查 AI API 地址");
+  // 整页翻译只走 AI 或浏览器内置引擎：静默退回免费接口会让整页质量参差不齐
+  const aiMode = s.provider === "ai" && s.aiApiKey && /^https?:\/\//i.test(s.aiBaseUrl);
+  const browserMode = s.provider === "browser";
+  if (!aiMode && !browserMode) throw new Error("整页翻译需要 AI 或浏览器引擎：请在扩展设置里选择并配置");
   const target = msg.target || "zh-CN";
   languageName(target);
   const raw = Array.isArray(msg.items) ? msg.items.slice(0, BLOCKS_MAX_ITEMS) : [];
@@ -520,24 +755,53 @@ async function handleTranslateBlocks(msg) {
   if (chars > BLOCKS_MAX_CHARS) throw new Error("单次翻译内容过多，请减少段落");
   const terms = parseGlossary((await chrome.storage.local.get("glossary")).glossary || "");
   const guarded = items.map(item => protectTerms(item.text, terms, target));
-  const system = (target === "en" ? SYS_ZH2EN : SYS_EN2ZH) + "\n\n" + sceneLine(msg.scene) + PAGE_RULES;
-  const payload = { items: items.map((item, index) => ({ id: item.id, text: guarded[index].text })) };
-  const answer = await chatOnce(s, [{ role: "system", content: system }, { role: "user", content: JSON.stringify(payload) }]);
-  const parsed = parseTaskJSON(answer);
-  if (!Array.isArray(parsed?.items)) throw new Error("AI 返回格式不正确，请重试");
-  const indexOf = new Map(items.map((item, index) => [item.id, index]));
-  const done = new Set();
+  const engineTag = aiMode ? "ai:" + (s.aiModel || "") : "browser";
+  const keyOf = index => translationCacheKey(engineTag, target, msg.scene, guarded[index].text);
+
+  /* 先回缓存命中的段：刷新/重访页面时这些段不重翻、不重计费 */
   const out = [];
-  for (const row of parsed.items) {
-    const id = Number(row && row.id);
-    const text = typeof row?.text === "string" ? row.text.trim() : "";
-    if (!Number.isInteger(id) || !text || done.has(id) || !indexOf.has(id)) continue;
-    try {
-      out.push({ id, text: guarded[indexOf.get(id)].restore(text) });
-      done.add(id);
-    } catch { /* 术语占位符丢失：不返回这一段，由内容脚本按单条重试 */ }
+  const done = new Set();
+  const pending = [];
+  for (let i = 0; i < items.length; i++) {
+    const hit = cacheGet(keyOf(i));
+    if (typeof hit === "string" && hit) {
+      out.push({ id: items[i].id, text: hit });
+      done.add(items[i].id);
+    } else pending.push(i);
   }
-  if (!out.length) throw new Error("AI 未返回可用的译文，请重试");
+
+  if (pending.length && aiMode) {
+    const system = (target === "en" ? SYS_ZH2EN : SYS_EN2ZH) + "\n\n" + sceneLine(msg.scene) + PAGE_RULES;
+    const payload = { items: pending.map(i => ({ id: items[i].id, text: guarded[i].text })) };
+    const answer = await chatOnce(s, [{ role: "system", content: system }, { role: "user", content: JSON.stringify(payload) }]);
+    const parsed = parseTaskJSON(answer);
+    if (!Array.isArray(parsed?.items)) throw new Error("AI 返回格式不正确，请重试");
+    const indexOf = new Map(items.map((item, index) => [item.id, index]));
+    for (const row of parsed.items) {
+      const id = Number(row && row.id);
+      const text = typeof row?.text === "string" ? row.text.trim() : "";
+      if (!Number.isInteger(id) || !text || done.has(id) || !indexOf.has(id)) continue;
+      try {
+        const restored = guarded[indexOf.get(id)].restore(text);
+        out.push({ id, text: restored });
+        done.add(id);
+        cachePut(keyOf(indexOf.get(id)), restored);
+      } catch { /* 术语占位符丢失：不返回这一段，由内容脚本按单条重试 */ }
+    }
+  }
+
+  if (pending.length && browserMode) {
+    for (const i of pending) {
+      try {
+        const restored = guarded[i].restore(await browserTranslateBG(guarded[i].text, target));
+        out.push({ id: items[i].id, text: restored });
+        done.add(items[i].id);
+        cachePut(keyOf(i), restored);
+      } catch { /* 个别段不可用：留 missing，由内容脚本按单条重试或报错 */ }
+    }
+  }
+
+  if (!out.length) throw new Error(aiMode ? "AI 未返回可用的译文，请重试" : "浏览器内置翻译不可用，请换引擎后重试");
   return { items: out, missing: items.filter(item => !done.has(item.id)).map(item => item.id) };
 }
 
@@ -743,6 +1007,7 @@ async function chatOnce(s, msgs, onChunk) {
     ? { model: s.aiModel, thinking: { type: "disabled" }, temperature: 0.3, stream: !!onChunk, messages: msgs }
     : { model: s.aiModel, temperature: 0.3, stream: !!onChunk, messages: msgs };
 
+  bumpUsage(msgs.reduce((n, m) => n + String(m?.content || "").length, 0), 1);   // 提示词字符数，估算用量
   const res = await fetch(base + "/chat/completions", {
     method: "POST",
     headers: {
@@ -951,6 +1216,7 @@ async function checkForUpdate(opts = {}) {
 
   const now = Date.now();
   const updateAvailable = cmpVersion(latest, current) > 0;
+  setUpdateBadge(updateAvailable);   // 全局红点：非翻译页面都能看到有新版本
   const next = {
     lastCheck: now,
     latest,

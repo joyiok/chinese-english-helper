@@ -115,6 +115,23 @@
   letter-spacing: 0.02em;
 }
 
+/* 划词结果操作行：朗读 / 收藏 */
+.zhenyi-bubble-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 7px;
+}
+.zhenyi-bubble-act {
+  border: 1px solid var(--zy-hair);
+  background: var(--zy-surface);
+  color: var(--zy-ink-2);
+  border-radius: 7px;
+  font: 600 11px var(--zy-font, sans-serif);
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.zhenyi-bubble-act:hover { background: var(--zy-canvas); color: var(--zy-ink); }
+
 /* ---- AI 看屏幕解读卡片 ---- */
 .zhenyi-explain {
   position: fixed;
@@ -535,6 +552,13 @@
 .zhenyi-work-status, .zhenyi-work-hint { margin: 0; color: var(--zy-ink-3); font: 12px/1.65 var(--zy-font); overflow-wrap: anywhere; }
 .zhenyi-work-status.zhenyi-work-error { color: var(--zy-err); }
 .zhenyi-work-checks { margin: 16px 0 12px; padding-top: 12px; border-top: 1px solid var(--zy-hair); }
+.zhenyi-work-termrow { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; }
+.zhenyi-work-termrow button {
+  border: 1px solid var(--zy-hair); background: var(--zy-surface); color: var(--zy-ink-2);
+  border-radius: 7px; font: 600 11.5px var(--zy-font, sans-serif); padding: 4px 11px; cursor: pointer;
+}
+.zhenyi-work-termrow button:hover { background: var(--zy-canvas); color: var(--zy-ink); }
+.zhenyi-work-termrow .zhenyi-work-hint { margin: 0; }
 .zhenyi-work-checks ul { margin: 8px 0; padding-left: 18px; font-size: 12px; }
 .zhenyi-work-checks li { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
 .zhenyi-work-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--zy-hair); flex-shrink: 0; }
@@ -577,4 +601,16 @@
 .zhenyi-pagebar-toggle:hover { background: #23252b; }
 .zhenyi-pagebar-count { font-weight: 500; font-size: 11px; opacity: 0.85; }
 .zhenyi-pagebar-count:empty { display: none; }
+
+/* 双语对照：译文写回后紧跟的原文样式，克制不抢戏，还原时一并移除。
+ * 注意：span 挂在网站自己的元素下，这里只能用字面量颜色（扩展的 --zy-* 变量作用域够不到）。 */
+.zhenyi-orig {
+  display: inline;
+  color: #666b76;
+  opacity: 0.75;
+  font-size: 0.86em;
+  line-height: 1.6;
+}
+.zhenyi-orig::before { content: "（"; }
+.zhenyi-orig::after { content: "）"; }
 .zhenyi-pagebar :is(select, button):focus-visible { outline: 2px solid var(--zy-accent); outline-offset: 2px; }

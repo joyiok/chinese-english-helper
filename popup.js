@@ -14,6 +14,8 @@ const defaults = {
   inputTargetLang: "en",
   selTargetLang: "zh-CN",
   pageTargetLang: "zh-CN",
+  pageMode: "replace",
+  autoTranslateSites: [],
   provider: "google",
   aiBaseUrl: PRESETS.deepseek.baseUrl,
   aiModel: PRESETS.deepseek.model,
@@ -40,17 +42,17 @@ chrome.storage.sync.get(defaults, (s) => {
 // 注意：这里不要再 get 一次调用 renderUI，否则会用未迁移的旧值覆盖上面的渲染。
 
 const $ = (id) => document.getElementById(id);
-const fields = ["enabled", "hotkeyEnabled", "selMode", "inputTargetLang", "selTargetLang", "provider",
+const fields = ["enabled", "hotkeyEnabled", "selMode", "inputTargetLang", "selTargetLang", "pageMode", "provider",
                 "aiBaseUrl", "aiModel", "aiApiKey", "checkUpdates"];
 
 function renderUI(s) {
   fields.forEach((id) => {
     const el = $(id);
     if (el.type === "checkbox") el.checked = !!s[id];
-    else el.value = s[id] || "";
+    else el.value = Array.isArray(s[id]) ? s[id].join("\n") : (s[id] || "");
   });
   $("aiBox").classList.toggle("show", s.provider === "ai");
-  $("engineBadge").textContent = s.provider === "ai" ? "AI 模式" : "免费版";
+  $("engineBadge").textContent = s.provider === "ai" ? "AI 模式" : s.provider === "browser" ? "设备端" : "免费版";
 
   // 根据当前 base url 高亮预设
   const matched = Object.keys(PRESETS).find(
@@ -70,6 +72,8 @@ function renderUI(s) {
     } catch (e) {
       $("statusHint").textContent = "API 地址格式不正确";
     }
+  } else if (s.provider === "browser") {
+    $("statusHint").textContent = "设备端翻译：免费、离线、无需 Key。需 Chrome 138+，首次使用会下载语言包。";
   } else {
     $("statusHint").textContent = "";
   }
@@ -80,7 +84,7 @@ function save(patch) {
 }
 
 /* 开关/下拉：保存并刷新提示 */
-["enabled", "hotkeyEnabled", "selMode", "inputTargetLang", "selTargetLang", "provider", "checkUpdates"].forEach((id) => {
+["enabled", "hotkeyEnabled", "selMode", "inputTargetLang", "selTargetLang", "pageMode", "provider", "checkUpdates"].forEach((id) => {
   $(id).addEventListener("change", () => {
     const value = $(id).type === "checkbox" ? $(id).checked : $(id).value;
     save({ [id]: value });
@@ -278,3 +282,189 @@ function formatWhen(ts) {
 }
 
 $("checkUpdateBtn").addEventListener("click", () => requestUpdateInfo(true));
+
+/* ---- 本月翻译用量（仅本地统计） ---- */
+function formatUsage(u) {
+  if (!u || !u.month) return "—";
+  const chars = u.chars >= 10000 ? (u.chars / 10000).toFixed(1) + "万" : String(u.chars || 0);
+  return chars + " 字符 · " + (u.reqs || 0) + " 次";
+}
+chrome.storage.local.get("usage", (obj) => { $("usageBadge").textContent = formatUsage(obj && obj.usage); });
+
+/* ---- 术语表导出 / 导入 ---- */
+$("exportGlossary").addEventListener("click", () => {
+  const text = $("glossary").value;
+  if (!text.trim()) { $("glossaryStatus").textContent = "术语表为空，无可导出内容。"; return; }
+  try {
+    downloadTextFile("中英互译术语表.txt", text);
+    $("glossaryStatus").textContent = "已导出当前编辑框内容。";
+  } catch (e) {
+    $("glossaryStatus").textContent = "导出失败：" + (e && e.message);
+    $("glossaryStatus").classList.add("error");
+  }
+});
+
+$("importGlossaryBtn").addEventListener("click", () => $("importGlossaryFile").click());
+$("importGlossaryFile").addEventListener("change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  if (file.size > 60000) { glossaryStatusError("文件过大，不是术语表文件。", "glossaryStatus"); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    $("glossary").value = String(reader.result || "").slice(0, 12000);
+    $("glossaryStatus").textContent = "已载入，检查后点「保存术语表」生效。";
+  };
+  reader.onerror = () => glossaryStatusError("读取文件失败。", "glossaryStatus");
+  reader.readAsText(file, "utf-8");
+});
+
+function glossaryStatusError(text, id) {
+  $(id).textContent = text;
+  $(id).classList.add("error");
+}
+
+function downloadTextFile(name, text) {
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 5000);
+}
+
+/* ---- 生词本 ---- */
+function renderVocab(list) {
+  const box = $("vocabList");
+  box.replaceChildren();
+  if (!Array.isArray(list) || !list.length) {
+    const p = document.createElement("p");
+    p.className = "vocab-empty";
+    p.textContent = "还没有收藏。划词翻译后，点气泡里的「收」。";
+    box.appendChild(p);
+    return;
+  }
+  for (const item of list) {
+    const row = document.createElement("div");
+    row.className = "vocab-item";
+    const text = document.createElement("div");
+    text.className = "v-text";
+    const src = document.createElement("div");
+    src.className = "v-src"; src.textContent = item.text;
+    const dst = document.createElement("div");
+    dst.className = "v-dst"; dst.textContent = "→ " + item.tr;
+    text.append(src, dst);
+    const del = document.createElement("button");
+    del.type = "button"; del.className = "v-del"; del.title = "删除"; del.textContent = "×";
+    del.addEventListener("click", () => {
+      chrome.runtime.sendMessage({ type: "VOCAB_DELETE", id: item.id }, () => {
+        void chrome.runtime.lastError;
+        loadVocab();
+      });
+    });
+    row.append(text, del);
+    box.appendChild(row);
+  }
+}
+
+function loadVocab() {
+  chrome.storage.local.get("vocab", (obj) => {
+    renderVocab(obj && obj.vocab);
+    $("exportVocab").disabled = !Array.isArray(obj?.vocab) || !obj.vocab.length;
+  });
+}
+loadVocab();
+
+$("exportVocab").addEventListener("click", () => {
+  chrome.storage.local.get("vocab", (obj) => {
+    const list = obj && obj.vocab;
+    if (!Array.isArray(list) || !list.length) { vocabError("生词本为空。"); return; }
+    const tsv = list.map(v => v.text + "\t" + v.tr).join("\n");
+    try {
+      downloadTextFile("生词本-Anki.txt", tsv);
+      $("vocabStatus").textContent = "已导出 Anki 可导入的 TSV（制表符分隔）。";
+    } catch (e) { vocabError("导出失败：" + (e && e.message)); }
+  });
+});
+
+function vocabError(text) {
+  $("vocabStatus").textContent = text;
+  $("vocabStatus").classList.add("error");
+}
+
+let vocabClearArmed = 0;
+$("clearVocabBtn").addEventListener("click", () => {
+  if (Date.now() - vocabClearArmed > 3000) {
+    vocabClearArmed = Date.now();
+    $("clearVocabBtn").textContent = "确认清空？";
+    $("vocabStatus").textContent = "再点一次确认清空生词本（不可撤销）。";
+    setTimeout(() => { if (Date.now() - vocabClearArmed >= 3000) $("clearVocabBtn").textContent = "清空生词本"; }, 3200);
+    return;
+  }
+  vocabClearArmed = 0;
+  $("clearVocabBtn").textContent = "清空生词本";
+  chrome.runtime.sendMessage({ type: "VOCAB_CLEAR" }, () => {
+    void chrome.runtime.lastError;
+    loadVocab();
+    $("vocabStatus").textContent = "已清空。";
+  });
+});
+
+/* ---- 自动翻译站点 ---- */
+let autoSitesHost = "";
+function hostMatches(host, pat) {
+  host = String(host || "").toLowerCase().trim();
+  pat = String(pat || "").toLowerCase().trim()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+  if (!host || !pat) return false;
+  return host === pat || host.endsWith("." + pat);
+}
+
+function currentHost(cb) {
+  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    try { cb(tab && tab.url ? new URL(tab.url).hostname : ""); } catch { cb(""); }
+  });
+}
+
+chrome.storage.sync.get({ autoTranslateSites: [] }, (s) => {
+  const sites = Array.isArray(s.autoTranslateSites) ? s.autoTranslateSites : [];
+  $("autoSitesText").value = sites.join("\n");
+  currentHost((host) => {
+    autoSitesHost = host;
+    $("autoSiteLabel").textContent = host ? "在 " + host + " 自动整页翻译" : "本站自动整页翻译（非网页）";
+    $("autoSite").disabled = !host;
+    $("autoSite").checked = host && sites.some(pat => hostMatches(host, pat));
+  });
+});
+
+$("autoSite").addEventListener("change", () => {
+  const add = $("autoSite").checked;
+  chrome.storage.sync.get({ autoTranslateSites: [] }, (s) => {
+    let sites = Array.isArray(s.autoTranslateSites) ? [...s.autoTranslateSites] : [];
+    if (add) {
+      if (!sites.includes(autoSitesHost)) sites.push(autoSitesHost);
+    } else {
+      sites = sites.filter(pat => !hostMatches(autoSitesHost, pat));
+    }
+    chrome.storage.sync.set({ autoTranslateSites: sites }, () => {
+      $("autoSitesText").value = sites.join("\n");
+      $("autoSitesStatus").textContent = add
+        ? "已开启：下次打开该站点自动整页翻译。"
+        : "已关闭该站点的自动翻译。";
+    });
+  });
+});
+
+$("saveAutoSites").addEventListener("click", () => {
+  const sites = $("autoSitesText").value.split(/\n/).map(l => l.trim()).filter(Boolean).slice(0, 50);
+  chrome.storage.sync.set({ autoTranslateSites: sites }, () => {
+    $("autoSitesStatus").textContent = "已保存 " + sites.length + " 个站点。";
+    currentHost((host) => {
+      autoSitesHost = host;
+      $("autoSite").checked = host && sites.some(pat => hostMatches(host, pat));
+    });
+  });
+});

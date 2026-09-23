@@ -9,6 +9,7 @@ const path = require("node:path");
 const { JSDOM } = require("jsdom");
 
 const CONTENT = fs.readFileSync(path.join(__dirname, "content.js"), "utf8");
+const CURRENT_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, "manifest.json"), "utf8")).version;
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function boot(initialStore = {}) {
@@ -49,6 +50,7 @@ function boot(initialStore = {}) {
   const chrome = {
     runtime: {
       lastError: null,
+      getManifest: () => ({ version: CURRENT_VERSION }),
       onMessage: { addListener(fn) { listeners.push(fn); } },
       sendMessage(msg, cb) {
         sent.push(msg);
@@ -59,6 +61,8 @@ function boot(initialStore = {}) {
         }
         else if (msg.type === "AGENT_STATE_GET") resp = { state: null };
         else if (msg.type === "CAPTURE_TAB") resp = { ok: false };
+        else if (msg.type === "ADD_TERM") resp = { ok: true, action: "added", count: 1, line: msg.source + " = " + msg.result };
+        else if (msg.type === "SAVE_VOCAB") resp = { ok: true, count: 1 };
         else if (msg.type === "EXPLAIN_CHAT") {
           resp = chatReply ? chatReply(msg) : { ok: true, answer: '{"action":"done","answer":"完成"}' };
         }
@@ -112,7 +116,7 @@ function selectionSender(env, el) {
 (async () => {
   /* 1. PING 返回当前版本，供弹窗诊断显示 */
   let env = boot();
-  assert.equal(env.send({ type: "PING" }).v, "2.1.0");
+  assert.equal(env.send({ type: "PING" }).v, CURRENT_VERSION);
 
   /* 2. EXPLAIN_RESULT 把 markdown 渲染进面板并标注来源 */
   env.send({ type: "EXPLAIN_RESULT", text: "**重点**\n\n- 甲\n- 乙", context: "页面文字", vision: true });
@@ -409,22 +413,23 @@ function selectionSender(env, el) {
 
   /* 13. 划词方式立即保存，重新打开弹窗仍使用保存值。 */
   const popupStore = {};
+  const popupLocal = { glossary: "" };
   const popupMsgs = [];
-  const openPopup = async () => {
+  const openPopup = async (opts = {}) => {
     const dom = new JSDOM(fs.readFileSync(path.join(__dirname, "popup.html"), "utf8"), { runScripts: "outside-only" });
     dom.window.chrome = {
       storage: { sync: {
         get: (defaults, cb) => setTimeout(() => cb({ ...defaults, ...popupStore }), 0),
-        set: (patch) => Object.assign(popupStore, patch),
-      }, local: { get: (_defaults, cb) => cb({ glossary: "" }) } },
-      tabs: { query: (_q, cb) => cb([]) },
+        set: (patch, cb) => { Object.assign(popupStore, patch); cb && cb(); },
+      }, local: { get: (_defaults, cb) => cb({ ...popupLocal }) } },
+      tabs: { query: (_q, cb) => cb(opts.tabs || []), sendMessage: (_id, _msg, cb) => cb && cb({ v: CURRENT_VERSION }) },
       runtime: {
         lastError: null,
-        getManifest: () => ({ version: "2.2.0" }),
+        getManifest: () => ({ version: CURRENT_VERSION }),
         sendMessage: (msg, cb) => {
           popupMsgs.push(msg);
           setTimeout(() => cb && cb({ ok: true, result: {
-            status: "ok", current: "2.2.0", latest: "2.2.0", updateAvailable: false,
+            status: "ok", current: CURRENT_VERSION, latest: CURRENT_VERSION, updateAvailable: false,
             lastCheck: Date.now(),
             downloadUrl: "https://example.test/update.zip",
             commitsUrl: "https://example.test/commits",
@@ -452,7 +457,7 @@ function selectionSender(env, el) {
   const autoBefore = popupMsgs.length;
   let updPopup = await openPopup();
   assert.ok(popupMsgs.slice(autoBefore).some(m => m.type === "CHECK_UPDATE" && m.force === false), "打开弹窗应自动做一次节流检查");
-  assert.equal(updPopup.window.document.getElementById("versionBadge").textContent, "v2.2.0");
+  assert.equal(updPopup.window.document.getElementById("versionBadge").textContent, "v" + CURRENT_VERSION);
   updPopup.window.document.getElementById("checkUpdateBtn").click();
   await wait(20);
   assert.ok(popupMsgs.slice(autoBefore).some(m => m.type === "CHECK_UPDATE" && m.force === true), "手动点击应强制检查");
@@ -469,6 +474,82 @@ function selectionSender(env, el) {
   assert.match(offPopup.window.document.getElementById("updateStatus").textContent, /自动检查已关闭/);
   offPopup.window.close();
   delete popupStore.checkUpdates; /* 不影响后续用例的弹窗状态 */
+
+  /* 13c. v2.3 新增：浏览器引擎选项、双语模式、用量格式、术语导入导出、生词本、站点开关。 */
+  let cPopup = await openPopup();
+  const cw = () => cPopup.window;
+  assert.ok([...cw().document.getElementById("provider").options].some(o => o.value === "browser"), "应提供浏览器内置引擎选项");
+  const pmSel = cw().document.getElementById("pageMode");
+  pmSel.value = "bilingual";
+  pmSel.dispatchEvent(new (cw().Event)("change"));
+  assert.equal(popupStore.pageMode, "bilingual", "整页翻译模式应保存");
+  assert.equal(cw().formatUsage({ month: "2026-09", chars: 123456, reqs: 78 }), "12.3万 字符 · 78 次");
+  assert.equal(cw().formatUsage({ month: "2026-09", chars: 999, reqs: 1 }), "999 字符 · 1 次");
+  assert.equal(cw().formatUsage(null), "—");
+  cPopup.window.close();
+
+  /* 术语导出/导入：导出读当前编辑框，导入只载入不落盘，需再点保存 */
+  cPopup = await openPopup();
+  const createdBlobs = [];
+  cw().URL.createObjectURL = (blob) => { createdBlobs.push(blob); return "blob:test"; };
+  cw().URL.revokeObjectURL = () => {};
+  cw().HTMLAnchorElement.prototype.click = () => {};   /* 避免 jsdom 导航报错 */
+  cw().document.getElementById("glossary").value = "导出甲 = export A";
+  cw().document.getElementById("exportGlossary").click();
+  assert.equal(createdBlobs.length, 1);
+  assert.match(cw().document.getElementById("glossaryStatus").textContent, /已导出/);
+  const fileInput = cw().document.getElementById("importGlossaryFile");
+  const file = new (cw().File)(["导入甲 = imported A\n导入乙 = imported B"], "gloss.txt", { type: "text/plain" });
+  Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+  fileInput.dispatchEvent(new (cw().Event)("change"));
+  await wait(30);
+  assert.equal(cw().document.getElementById("glossary").value, "导入甲 = imported A\n导入乙 = imported B");
+  assert.match(cw().document.getElementById("glossaryStatus").textContent, /已载入/);
+  cPopup.window.close();
+
+  /* 生词本：渲染、删除、导出、两段式清空 */
+  popupLocal.vocab = [
+    { id: "a1", text: "bandwidth", tr: "带宽", ts: 1 },
+    { id: "a2", text: "renewal", tr: "续费", ts: 2 },
+  ];
+  cPopup = await openPopup();
+  const vocabItems = [...cw().document.querySelectorAll(".vocab-item")];
+  assert.equal(vocabItems.length, 2);
+  assert.match(vocabItems[0].textContent, /bandwidth/);
+  assert.match(vocabItems[1].textContent, /续费/);
+  vocabItems[1].querySelector(".v-del").click();
+  const delBefore = popupMsgs.filter(m => m.type === "VOCAB_DELETE").length;
+  assert.equal(delBefore, 1, "删除应发 VOCAB_DELETE");
+  assert.equal(popupMsgs.filter(m => m.type === "VOCAB_DELETE")[0].id, "a2");
+  cw().URL.createObjectURL = () => "blob:test2";
+  cw().URL.revokeObjectURL = () => {};
+  cw().document.getElementById("exportVocab").click();
+  assert.match(cw().document.getElementById("vocabStatus").textContent, /已导出/);
+  const clearBtn = cw().document.getElementById("clearVocabBtn");
+  clearBtn.click();   /* 第一次：布防 */
+  assert.match(clearBtn.textContent, /确认清空/);
+  clearBtn.click();   /* 第二次：执行 */
+  assert.equal(popupMsgs.filter(m => m.type === "VOCAB_CLEAR").length, 1);
+  cPopup.window.close();
+
+  /* 站点自动翻译开关：读当前标签页域名，开/关同步到 autoTranslateSites */
+  cPopup = await openPopup({ tabs: [{ id: 1, url: "https://example.com/page" }] });
+  const autoSite = cw().document.getElementById("autoSite");
+  await wait(20);
+  assert.equal(autoSite.disabled, false);
+  assert.equal(autoSite.checked, false, "未命中列表时默认关");
+  assert.match(cw().document.getElementById("autoSiteLabel").textContent, /example\.com/);
+  autoSite.checked = true;
+  autoSite.dispatchEvent(new (cw().Event)("change"));
+  await wait(20);
+  assert.equal(JSON.stringify(popupStore.autoTranslateSites), JSON.stringify(["example.com"]), "开启应写入当前域名");
+  assert.match(cw().document.getElementById("autoSitesStatus").textContent, /已开启/);
+  autoSite.checked = false;
+  autoSite.dispatchEvent(new (cw().Event)("change"));
+  await wait(20);
+  assert.equal(JSON.stringify(popupStore.autoTranslateSites), JSON.stringify([]), "关闭应移除该域名");
+  cPopup.window.close();
+  delete popupLocal.vocab;
 
   /* 整页翻译测试用的小工具：控制片、状态文案，以及不含文字的结构签名。 */
   const pagebarOf = (e) => e.doc.documentElement.querySelector(".zhenyi-pagebar");
@@ -826,6 +907,150 @@ function selectionSender(env, el) {
     [...env.doc.querySelectorAll("p")].map((p) => p.firstChild.nodeValue),
     ["T:First pending block.", "T:Second pending block."]
   );
+  env.window.close();
+
+  /* 24. 站点自动翻译：命中域名列表的顶层页面自动开始整页翻译，并通知图标徽章。 */
+  env = boot({ autoTranslateSites: ["example.com"] });
+  env.doc.body.innerHTML = "<p>Auto translate this page now.</p>";
+  await wait(80);
+  assert.equal(env.asks("TRANSLATE_BLOCKS").length, 1, "命中站点规则应自动开始整页翻译");
+  assert.equal(env.doc.querySelector("p").firstChild.nodeValue, "T:Auto translate this page now.");
+  assert.ok(env.sent.some(m => m.type === "PAGE_STATE" && m.active === true), "应通知后台设置「译」徽章");
+  env.userEvent(pagebarOf(env).querySelector('[data-page="restore"]'), "click");
+  assert.ok(env.sent.some(m => m.type === "PAGE_STATE" && m.active === false), "还原后应通知清除徽章");
+  env.window.close();
+
+  env = boot({ autoTranslateSites: ["other.site"] });
+  env.doc.body.innerHTML = "<p>No auto translate here.</p>";
+  await wait(80);
+  assert.equal(env.asks("TRANSLATE_BLOCKS").length, 0, "不匹配的域名不自动翻");
+  assert.equal(env.sent.filter(m => m.type === "PAGE_STATE").length, 0, "不匹配时不应发徽章消息");
+  env.window.close();
+
+  /* 子域匹配：host 以 .pattern 结尾算命中 */
+  env = boot({ autoTranslateSites: ["example.com"] });
+  env.doc.body.innerHTML = "<p>Subdomain counts.</p>";
+  const realHost = env.window.location.hostname;
+  assert.equal(realHost, "example.com");
+  env.window.close();   /* 子域匹配逻辑在弹窗侧单测（hostMatches），这里只验证主域命中 */
+
+  /* 25. iframe 不自动整页翻译：避免一个页面里的多个框架连环触发。 */
+  env = boot({ autoTranslateSites: ["example.com"] });
+  env.doc.body.innerHTML = "<p>Host page content.</p>";
+  const frame = env.doc.createElement("iframe");
+  env.doc.body.appendChild(frame);
+  const frameSent = [];
+  frame.contentWindow.chrome = {
+    runtime: {
+      lastError: null,
+      onMessage: { addListener() {} },
+      sendMessage(msg, cb) { frameSent.push(msg); cb && cb({ ok: true }); },
+    },
+    storage: {
+      sync: { get(defaults, cb) { cb({ ...defaults, autoTranslateSites: ["example.com"] }); }, set() {} },
+      onChanged: { addListener() {} },
+    },
+  };
+  frame.contentWindow.eval(CONTENT);
+  await wait(80);
+  assert.equal(frameSent.filter(m => m.type === "TRANSLATE_BLOCKS").length, 0, "iframe 里不得自动整页翻译");
+  assert.ok(env.asks("TRANSLATE_BLOCKS").length >= 1, "宿主页面照常自动翻");
+  env.window.close();
+
+  /* 26. 双语对照模式：译文写回后紧跟原文 span，还原时一并移除。
+   *     这是唯一新增元素的地方，仅译文模式的结构零改动由用例 15 保证。 */
+  env = boot({ pageMode: "bilingual" });
+  env.doc.body.innerHTML = '<div id="wrap"><p>Hello <b>bold</b> text.</p><p>Second paragraph here.</p></div>';
+  const bilingualSigBefore = structureSignature(env.doc.body);
+  env.send({ type: "TRANSLATE_PAGE", target: "zh-CN" });
+  await wait(40);
+  const origSpans = env.doc.querySelectorAll(".zhenyi-orig");
+  assert.equal(origSpans.length, 4, "四个文本节点（含 <b>bold</b>）都应插入原文 span");
+  assert.equal(origSpans[0].textContent, "Hello");
+  assert.equal(origSpans[0].parentNode.tagName, "P", "原文 span 挂在译文同级");
+  assert.equal(env.doc.querySelector("p").firstChild.nodeValue, "T:Hello ", "译文仍写回原文本节点");
+  await wait(700);   /* MutationObserver 防抖后重扫：原文 span 不得被当成待翻内容 */
+  assert.equal(env.asks("TRANSLATE_BLOCKS").length, 1, "原文 span 不得被当成待翻内容");
+  env.userEvent(pagebarOf(env).querySelector('[data-page="restore"]'), "click");
+  assert.equal(env.doc.querySelectorAll(".zhenyi-orig").length, 0, "还原后原文 span 全部移除");
+  assert.equal(structureSignature(env.doc.body), bilingualSigBefore, "还原后结构回到原样");
+  assert.equal(env.doc.querySelector("p").firstChild.nodeValue, "Hello ", "原文逐字节恢复");
+  env.window.close();
+
+  /* 27. 页栏「对照原文」即时切换：已翻段落立即补上/移除原文，无需重翻。 */
+  env = boot();
+  env.doc.body.innerHTML = "<p>Toggle bilingual mode live.</p>";
+  env.send({ type: "TRANSLATE_PAGE", target: "zh-CN" });
+  await wait(40);
+  assert.equal(env.asks("TRANSLATE_BLOCKS").length, 1);
+  assert.equal(env.doc.querySelectorAll(".zhenyi-orig").length, 0, "默认仅译文不插原文");
+  const modeBtn = pagebarOf(env).querySelector('[data-page="mode"]');
+  env.userEvent(modeBtn, "click");
+  assert.equal(env.doc.querySelectorAll(".zhenyi-orig").length, 1, "切到对照应立即补原文");
+  assert.equal(env.doc.querySelector(".zhenyi-orig").textContent, "Toggle bilingual mode live.");
+  assert.equal(env.store.pageMode, "bilingual", "模式选择应持久化");
+  assert.equal(modeBtn.textContent, "切换为仅译文");
+  env.userEvent(modeBtn, "click");
+  assert.equal(env.doc.querySelectorAll(".zhenyi-orig").length, 0, "切回仅译文应移除原文");
+  assert.equal(env.store.pageMode, "replace");
+  assert.equal(modeBtn.textContent, "对照原文");
+  assert.equal(env.asks("TRANSLATE_BLOCKS").length, 1, "切换模式不得重翻");
+  env.window.close();
+
+  /* 28. 划词气泡操作行：朗读原文（本地 TTS）与收藏生词。 */
+  env = boot({ selMode: "direct" });
+  env.doc.body.innerHTML = "<p>Speak and collect this phrase.</p>";
+  const speakCalls = [];
+  env.window.speechSynthesis = {
+    cancel() {},
+    speak(u) { speakCalls.push({ text: u.text, lang: u.lang }); },
+  };
+  env.window.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
+  const sender28 = selectionSender(env, env.doc.querySelector("p"));
+  sender28("Speak and collect this phrase.");
+  await wait(30);
+  const actBtns = [...env.doc.querySelectorAll(".zhenyi-bubble-act")];
+  assert.equal(actBtns.length, 2, "应有朗读与收藏两个按钮");
+  env.userEvent(actBtns[0], "click");
+  assert.equal(speakCalls.length, 1);
+  assert.equal(speakCalls[0].text, "Speak and collect this phrase.");
+  assert.equal(speakCalls[0].lang, "en-US");
+  env.userEvent(actBtns[1], "click");
+  const vocabMsg = env.asks("SAVE_VOCAB")[0];
+  assert.ok(vocabMsg, "应发出 SAVE_VOCAB");
+  assert.equal(vocabMsg.entry.text, "Speak and collect this phrase.");
+  assert.equal(vocabMsg.entry.tr, "EN:Speak and collect this phrase.");
+  assert.match(env.doc.querySelector(".zhenyi-bubble-foot").textContent, /已收藏/);
+  /* 没有 TTS 的环境：朗读按钮不出现，收藏仍可用 */
+  env = boot({ selMode: "direct" });
+  env.doc.body.innerHTML = "<p>No tts here.</p>";
+  const sender28b = selectionSender(env, env.doc.querySelector("p"));
+  sender28b("No tts here.");
+  await wait(30);
+  const noTtsBtns = [...env.doc.querySelectorAll(".zhenyi-bubble-act")];
+  assert.equal(noTtsBtns.length, 1, "无 TTS 时只有收藏按钮");
+  env.userEvent(noTtsBtns[0], "click");
+  assert.equal(env.asks("SAVE_VOCAB").length, 1);
+  env.window.close();
+
+  /* 29. 译文预览「存为术语」：把原文/译文对发给后台写入术语表，仅翻译模式可见。 */
+  env = boot();
+  env.doc.body.innerHTML = '<textarea id="ta">我想续订服务器</textarea>';
+  env.send({ type: "OPEN_WORKBENCH", mode: "translate" });
+  let panel29 = env.doc.querySelector(".zhenyi-workbench");
+  assert.ok(panel29, "应打开写作面板");
+  panel29.querySelector('[data-field="source"]').value = "续订";
+  panel29.querySelector('[data-field="result"]').value = "renew";
+  env.userEvent(panel29.querySelector('[data-act="term"]'), "click");
+  await wait(20);
+  const termMsg = env.asks("ADD_TERM")[0];
+  assert.ok(termMsg, "应发出 ADD_TERM");
+  assert.equal(termMsg.source, "续订");
+  assert.equal(termMsg.result, "renew");
+  assert.match(panel29.querySelector(".zhenyi-work-status").textContent, /已存为术语/);
+  env.send({ type: "OPEN_WORKBENCH", mode: "reply" });
+  panel29 = env.doc.querySelector(".zhenyi-workbench");
+  assert.equal(panel29.querySelector('[data-act="term"]').hidden, true, "写回复模式不显示存术语");
   env.window.close();
 
   console.log("content ok");

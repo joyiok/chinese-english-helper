@@ -12,6 +12,7 @@ const localStore = {};
 const notifs = [];
 const openedTabs = [];
 const alarmCreates = [];
+const badgeCalls = [];
 const CURRENT_VERSION = JSON.parse(fs.readFileSync("manifest.json", "utf8")).version;
 const tabEvents = () => {
   const listeners = new Set();
@@ -25,6 +26,8 @@ const sandbox = {
   Uint8Array,
   Response,
   ReadableStream,
+  setTimeout,
+  clearTimeout,
   chrome: {
     runtime: {
       lastError: null,
@@ -45,6 +48,11 @@ const sandbox = {
     alarms: {
       create(name, info) { alarmCreates.push({ name, info }); },
       onAlarm: { addListener() {} },
+    },
+    action: {
+      setBadgeText(opts) { badgeCalls.push({ fn: "text", ...opts }); },
+      setBadgeBackgroundColor(opts) { badgeCalls.push({ fn: "bg", ...opts }); },
+      setBadgeTextColor(opts) { badgeCalls.push({ fn: "fg", ...opts }); },
     },
     scripting: { async executeScript() {}, async insertCSS() {} },
     storage: {
@@ -84,6 +92,8 @@ vm.runInNewContext(fs.readFileSync("background.js", "utf8"), sandbox);
 const call = (msg, tabId) => new Promise((resolve) => {
   msgListener(msg, tabId ? { tab: { id: tabId } } : {}, resolve);
 });
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 (async () => {
   /* 右键菜单 → 打开 AI 面板 */
@@ -566,6 +576,139 @@ const call = (msg, tabId) => new Promise((resolve) => {
   await sandbox.maybeAutoCheckUpdate();
   assert.equal(autoFetches, 0, "关掉自动检查后不得发请求");
   sandbox.chrome.storage.sync.get = syncGetSaved;
+
+  /* ---- 译文缓存：同文本不重翻不重计费，术语变更后作废 ---- */
+  sandbox.clearTranslateCache();
+  const syncForCache = sandbox.chrome.storage.sync.get;
+  sandbox.chrome.storage.sync.get = async () => ({ provider: "google" });
+  let cacheFetches = 0;
+  sandbox.fetch = async () => {
+    cacheFetches++;
+    return new Response(JSON.stringify([[["缓存输出"]]]));
+  };
+  const c1 = await call({ type: "TRANSLATE", text: "cache me please", target: "zh-CN" }, 7);
+  assert.equal(c1.ok, true);
+  assert.equal(c1.out, "缓存输出");
+  assert.equal(cacheFetches, 1);
+  await sleep(10);   // bumpUsage 是悬空 Promise，等它落地再快照
+  const usageAfterFirst = { ...localStore.usage };
+  const c2 = await call({ type: "TRANSLATE", text: "cache me please", target: "zh-CN" }, 7);
+  assert.equal(c2.out, "缓存输出");
+  assert.equal(cacheFetches, 1, "缓存命中不得重复请求");
+  assert.equal(JSON.stringify(localStore.usage), JSON.stringify(usageAfterFirst), "缓存命中不计费");
+  /* 分批协议的缓存命中在下方浏览器引擎段验证：整页翻译不接受 Google 引擎 */
+
+  /* ---- 术语闭环：从译文一键存术语，同中文更新、重复识别、格式与上限校验 ---- */
+  await sandbox.chrome.storage.local.set({ glossary: "" });   // 早期用例给术语表留了数据，先清空
+  const add1 = await call({ type: "ADD_TERM", source: "续订", result: "renewal" }, 7);
+  assert.equal(add1.ok, true);
+  assert.equal(add1.action, "added");
+  assert.equal(add1.line, "续订 = renewal");
+  assert.equal(localStore.glossary, "续订 = renewal");
+  assert.equal(cacheFetches, 1);
+  const c3 = await call({ type: "TRANSLATE", text: "cache me please", target: "zh-CN" }, 7);
+  assert.equal(cacheFetches, 2, "术语变更后缓存必须作废");
+  const dupTerm = await call({ type: "ADD_TERM", source: "续订", result: "renewal" }, 7);
+  assert.equal(dupTerm.ok, true);
+  assert.equal(dupTerm.action, "duplicate");
+  const updTerm = await call({ type: "ADD_TERM", source: "续订", result: "renew again" }, 7);
+  assert.equal(updTerm.action, "updated");
+  assert.equal(localStore.glossary, "续订 = renew again");
+  const badDirection = await call({ type: "ADD_TERM", source: "hello", result: "world" }, 7);
+  assert.equal(badDirection.ok, false);
+  assert.match(badDirection.error, /一边是中文/);
+  const badLong = await call({ type: "ADD_TERM", source: "x".repeat(81), result: "英文" }, 7);
+  assert.equal(badLong.ok, false);
+  assert.match(badLong.error, /80 字符/);
+  const badFormat = await call({ type: "ADD_TERM", source: "带=号", result: "with equals" }, 7);
+  assert.equal(badFormat.ok, false);
+  sandbox.chrome.storage.sync.get = syncForCache;
+
+  /* ---- 生词本：收藏去重、最新在前、删除与清空 ---- */
+  const v1 = await call({ type: "SAVE_VOCAB", entry: { text: "bandwidth", tr: "带宽", url: "https://example.com/a", title: "A" } }, 7);
+  assert.equal(v1.ok, true);
+  assert.equal(localStore.vocab.length, 1);
+  assert.equal(localStore.vocab[0].text, "bandwidth");
+  assert.ok(localStore.vocab[0].id, "条目应有 id");
+  const v2 = await call({ type: "SAVE_VOCAB", entry: { text: "bandwidth", tr: "带宽" } }, 7);
+  assert.equal(v2.ok, true);
+  assert.equal(localStore.vocab.length, 1, "重复收藏去重");
+  await call({ type: "SAVE_VOCAB", entry: { text: "renewal", tr: "续费" } }, 7);
+  assert.equal(localStore.vocab.length, 2);
+  assert.equal(localStore.vocab[0].text, "renewal", "最新在前");
+  await call({ type: "VOCAB_DELETE", id: localStore.vocab[1].id }, 7);
+  assert.equal(localStore.vocab.length, 1);
+  assert.equal(localStore.vocab[0].text, "renewal");
+  await call({ type: "VOCAB_CLEAR" }, 7);
+  assert.equal(localStore.vocab.length, 0);
+  const vbad = await call({ type: "SAVE_VOCAB", entry: { text: "", tr: "x" } }, 7);
+  assert.equal(vbad.ok, false);
+
+  /* ---- 图标徽章：整页翻译状态通知按标签页设置/清除 ---- */
+  const badgeTextCalls = () => badgeCalls.filter(c => c.fn === "text");
+  await call({ type: "PAGE_STATE", active: true }, 42);
+  const on = badgeTextCalls().at(-1);
+  assert.equal(on.text, "译");
+  assert.equal(on.tabId, 42);
+  await call({ type: "PAGE_STATE", active: false }, 42);
+  assert.equal(badgeTextCalls().at(-1).text, "");
+  /* 新版本红点是全局的，与标签页徽章互不干扰 */
+  sandbox.fetch = async () => new Response(JSON.stringify({ version: "9.9.8" }));
+  await sandbox.checkForUpdate({ force: true, notify: false });
+  assert.ok(badgeTextCalls().some(c => c.text === "•" && c.tabId === undefined), "新版本应有全局红点");
+  assert.equal(badgeCalls.filter(c => c.fn === "bg").at(-1).color, "#b42318");
+  sandbox.fetch = async () => new Response(JSON.stringify({ version: CURRENT_VERSION }));
+  await sandbox.checkForUpdate({ force: true, notify: false });
+  assert.equal(badgeTextCalls().at(-1).text, "", "回到最新应清掉红点");
+
+  /* ---- 浏览器内置引擎：可用时翻译并计数，不可用时如实报错 ---- */
+  const syncForBrowser = sandbox.chrome.storage.sync.get;
+  sandbox.chrome.storage.sync.get = async () => ({ provider: "browser", aiBaseUrl: "", aiModel: "", aiApiKey: "" });
+  sandbox.clearTranslateCache();
+  let browserCalls = 0;
+  sandbox.Translator = {
+    async availability() { return "available"; },
+    async create() { return { async translate(text) { browserCalls++; return "浏览器:" + text; } }; },
+  };
+  const bt = await call({ type: "TRANSLATE", text: "hello browser", target: "zh-CN" }, 7);
+  assert.equal(bt.ok, true);
+  assert.equal(bt.out, "浏览器:hello browser");
+  assert.equal(browserCalls, 1);
+  await sleep(10);
+  const usageBeforeBrowser = { ...localStore.usage };
+  const bt2 = await call({ type: "TRANSLATE", text: "hello browser", target: "zh-CN" }, 7);
+  assert.equal(browserCalls, 1, "浏览器引擎也走缓存");
+  assert.equal(JSON.stringify(localStore.usage), JSON.stringify(usageBeforeBrowser), "缓存命中不计用量");
+  const bb = await call({ type: "TRANSLATE_BLOCKS", items: [{ id: 3, text: "page text" }], target: "zh-CN" }, 7);
+  assert.equal(bb.ok, true, "strict 整页翻译接受浏览器引擎");
+  assert.equal(bb.items[0].text, "浏览器:page text");
+  const bb2 = await call({ type: "TRANSLATE_BLOCKS", items: [{ id: 3, text: "page text" }], target: "zh-CN" }, 7);
+  assert.equal(bb2.ok, true);
+  assert.equal(bb2.items[0].text, "浏览器:page text");
+  assert.equal(browserCalls, 2, "分批协议也要命中缓存：同段不重翻");
+  sandbox.clearTranslateCache();
+  sandbox.Translator = { async availability() { return "unavailable"; } };
+  const bf = await call({ type: "TRANSLATE", text: "nope", target: "zh-CN" }, 7);
+  assert.equal(bf.ok, false);
+  assert.match(bf.error, /不支持该语言方向/);
+  delete sandbox.Translator;
+  sandbox.clearTranslateCache();
+  const bnf = await call({ type: "TRANSLATE", text: "nope2", target: "zh-CN" }, 7);
+  assert.equal(bnf.ok, false);
+  assert.match(bnf.error, /不支持浏览器内置翻译/);
+  sandbox.chrome.storage.sync.get = syncForBrowser;
+
+  /* ---- 用量统计：AI 路径按提示词字符计数 ---- */
+  const syncForUsage = sandbox.chrome.storage.sync.get;
+  sandbox.chrome.storage.sync.get = async () => ({ provider: "ai", aiBaseUrl: "https://example.test", aiModel: "test", aiApiKey: "key" });
+  sandbox.clearTranslateCache();
+  sandbox.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: "好的" } }] }));
+  const charsBefore = (localStore.usage && localStore.usage.chars) || 0;
+  const aiTrans = await call({ type: "TRANSLATE", text: "统计一下用量", target: "en" }, 7);
+  assert.equal(aiTrans.ok, true);
+  await sleep(10);
+  assert.ok(((localStore.usage && localStore.usage.chars) || 0) > charsBefore, "AI 请求应计入用量");
+  sandbox.chrome.storage.sync.get = syncForUsage;
 
   console.log("ok");
 })().catch((error) => {

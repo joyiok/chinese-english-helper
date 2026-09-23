@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "中英互译助手（写作与阅读）",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "整页双语对照翻译、中英翻译预览与还原、上下文回复、个人术语表、发送前查漏、关键信息提取，以及 AI 页面解读。适用于任意网页。",
   "permissions": ["storage", "activeTab", "scripting", "notifications", "contextMenus", "alarms"],
   "host_permissions": [

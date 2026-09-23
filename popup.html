@@ -213,6 +213,16 @@
     details summary::marker { color: var(--ink-3); }
     #glossary { width: 100%; min-height: 120px; padding: 9px; resize: vertical; border: 1px solid var(--hair); border-radius: 8px; font: 12px/1.6 var(--font); }
     #glossary:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    #autoSitesText { width: 100%; min-height: 60px; padding: 9px; resize: vertical; border: 1px solid var(--hair); border-radius: 8px; font: 12px/1.6 var(--font); }
+    .vocab-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--hair-2); border-radius: 8px; }
+    .vocab-item { display: flex; align-items: flex-start; gap: 8px; padding: 7px 10px; font-size: 12px; line-height: 1.5; }
+    .vocab-item + .vocab-item { border-top: 1px solid var(--hair-2); }
+    .vocab-item .v-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .vocab-item .v-src { color: var(--ink); }
+    .vocab-item .v-dst { color: var(--ink-3); }
+    .vocab-item .v-del { flex-shrink: 0; width: 20px; height: 20px; border: none; background: none; color: var(--ink-3); cursor: pointer; font-size: 13px; border-radius: 5px; }
+    .vocab-item .v-del:hover { background: var(--canvas); color: var(--err); }
+    .vocab-empty { padding: 10px; color: var(--ink-3); font-size: 12px; }
     #glossaryStatus { white-space: pre-wrap; }
     .hint.error { color: var(--err); }
     .mini-btn {
@@ -278,8 +288,12 @@
         <span>当前引擎 <span class="badge" id="engineBadge">免费版</span></span>
         <select id="provider">
           <option value="google">Google（免费）</option>
+          <option value="browser">浏览器内置（免费 · 实验）</option>
           <option value="ai">AI 大模型（更自然）</option>
         </select>
+      </div>
+      <div class="row">
+        <span>本月翻译用量 <span class="badge" id="usageBadge">—</span></span>
       </div>
       <div class="ai-box" id="aiBox">
         <div class="field">
@@ -326,6 +340,13 @@
           <option value="en">英文 English</option>
         </select>
       </div>
+      <div class="row">
+        <span>整页翻译显示</span>
+        <select id="pageMode">
+          <option value="replace">仅译文（原位替换）</option>
+          <option value="bilingual">译文 + 原文对照</option>
+        </select>
+      </div>
     </div>
 
     <!-- 个人术语表 -->
@@ -336,7 +357,45 @@
         <label for="glossary">固定译法</label>
         <textarea id="glossary" maxlength="12000" aria-describedby="glossaryHelp" placeholder="续费价 = renewal price&#10;流量 = bandwidth&#10;VPS = VPS"></textarea>
         <button id="saveGlossary" class="tool-btn" type="button" style="width: 100%; margin-top: 8px;">保存术语表</button>
+        <div class="tool-grid" style="margin-top: 8px;">
+          <button id="exportGlossary" class="tool-btn" type="button">导出</button>
+          <button id="importGlossaryBtn" class="tool-btn" type="button">导入</button>
+          <input type="file" id="importGlossaryFile" accept=".txt,text/plain" hidden />
+        </div>
         <p id="glossaryStatus" class="hint" role="status"></p>
+      </details>
+    </div>
+
+    <!-- 生词本 -->
+    <div class="section">
+      <details>
+        <summary>生词本</summary>
+        <p class="hint">划词翻译气泡里点「收」收藏原文与译文。最多 500 条，仅存本机。</p>
+        <div id="vocabList" class="vocab-list"></div>
+        <div class="tool-grid" style="margin-top: 8px;">
+          <button id="exportVocab" class="tool-btn" type="button">导出 Anki</button>
+          <button id="clearVocabBtn" class="tool-btn" type="button">清空生词本</button>
+        </div>
+        <p id="vocabStatus" class="hint" role="status"></p>
+      </details>
+    </div>
+
+    <!-- 自动翻译站点 -->
+    <div class="section">
+      <details>
+        <summary>自动翻译站点</summary>
+        <div class="row" style="padding: 6px 0 0;">
+          <span id="autoSiteLabel">本站自动整页翻译</span>
+          <label class="switch">
+            <input type="checkbox" id="autoSite" />
+            <span class="slider"></span>
+          </label>
+        </div>
+        <p class="hint">打开列表内网站时自动开始整页翻译（仅顶层页面，用当前引擎）。</p>
+        <label for="autoSitesText">域名列表（每行一个，含子域）</label>
+        <textarea id="autoSitesText" rows="3" placeholder="example.com&#10;docs.somesite.org"></textarea>
+        <button id="saveAutoSites" class="tool-btn" type="button" style="width: 100%; margin-top: 8px;">保存站点列表</button>
+        <p id="autoSitesStatus" class="hint" role="status"></p>
       </details>
     </div>
 

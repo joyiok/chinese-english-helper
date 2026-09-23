@@ -39,11 +39,17 @@
     inputTargetLang: "en",     // 输入框翻译目标语言
     selTargetLang: "zh-CN",    // 屏幕选中翻译目标语言
     pageTargetLang: "zh-CN",   // 整页翻译目标语言
+    pageMode: "replace",       // 整页翻译显示：replace=仅译文原位替换 / bilingual=译文+原文对照
+    autoTranslateSites: [],    // 打开即自动整页翻译的域名（仅顶层页面）
   };
   let settings = { ...DEFAULTS };
   let translationSettingsVersion = 0;
 
-  chrome.storage.sync.get(DEFAULTS, (s) => { settings = { ...DEFAULTS, ...s }; });
+  chrome.storage.sync.get(DEFAULTS, (s) => {
+    settings = { ...DEFAULTS, ...s };
+    // 延迟到本轮脚本全部初始化后再尝试：自动翻译依赖后面声明的整页翻译状态
+    setTimeout(maybeAutoPageTranslate, 0);
+  });
   chrome.storage.onChanged.addListener((changes) => {
     translationSettingsVersion++;
     cache.clear();
@@ -52,6 +58,31 @@
     }
     syncButtonVisibility();
   });
+
+  /* ---------------- 站点自动翻译：命中域名列表的顶层页面自动开始整页翻译 ----------------
+   * 匹配 host === pattern 或 host 以 .pattern 结尾（子域）；只顶层页面，iframe 不自动翻。 */
+  function siteMatches(host, pattern) {
+    host = String(host || "").toLowerCase().trim();
+    pattern = String(pattern || "").toLowerCase().trim()
+      .replace(/^[a-z][a-z0-9+.-]*:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+    if (!host || !pattern) return false;
+    return host === pattern || host.endsWith("." + pattern);
+  }
+
+  async function maybeAutoPageTranslate() {
+    if (!settings.enabled || !isCurrent()) return;
+    const sites = Array.isArray(settings.autoTranslateSites) ? settings.autoTranslateSites : [];
+    if (!sites.length) return;
+    if (window.top !== window) return;   // iframe 不自动整页翻，避免连环触发
+    if (!sites.some(pat => siteMatches(location.hostname, pat))) return;
+    if (pageState.active) return;
+    try {
+      await startPageTranslate(settings.pageTargetLang);
+      console.log("[中英互译助手] 已按站点规则自动开始整页翻译：" + location.hostname);
+    } catch (e) {
+      console.warn("[中英互译助手] 自动整页翻译未开始：", e.message);
+    }
+  }
 
   /* ---------------- 翻译 API（经后台中转，绕过页面 CSP，所有网站通用） ---------------- */
   const cache = new Map();
@@ -373,18 +404,77 @@
   function showBubble(x, y, loading) {
     bubble.querySelector(".zhenyi-bubble-body").textContent = loading ? "翻译中…" : "";
     bubble.querySelector(".zhenyi-bubble-foot").textContent = "";
+    const actions = bubble.querySelector(".zhenyi-bubble-actions");
+    if (actions) actions.replaceChildren();
     bubbleAnchor = [x, y];
     bubble.classList.add("zhenyi-show");
     placeBubble();
   }
 
+  /* 划词结果的操作行：朗读原文（本地 TTS，免费离线）+ 收藏生词 */
+  let bubbleResult = null;
+
+  function speakText(text) {
+    if (!text || !window.speechSynthesis || !window.SpeechSynthesisUtterance) return;
+    try {
+      window.speechSynthesis.cancel();
+      const u = new window.SpeechSynthesisUtterance(text);
+      u.lang = hasCJK(text) ? "zh-CN" : "en-US";
+      u.rate = 0.95;
+      window.speechSynthesis.speak(u);
+    } catch (e) { /* 无可用语音就静默 */ }
+  }
+
+  function saveVocab(text, translation) {
+    try {
+      chrome.runtime.sendMessage({
+        type: "SAVE_VOCAB",
+        entry: { text, tr: translation, url: String(location.href), title: String(document.title || "") },
+      }, (resp) => {
+        void chrome.runtime.lastError;
+        const foot = bubble.querySelector(".zhenyi-bubble-foot");
+        if (foot) foot.textContent = resp?.ok ? "已收藏到生词本" : "收藏失败：" + ((resp && resp.error) || "请重试");
+      });
+    } catch (e) { /* 后台不可达时忽略 */ }
+  }
+
+  function renderBubbleActions(text, translation) {
+    let actions = bubble.querySelector(".zhenyi-bubble-actions");
+    if (!actions) {
+      actions = document.createElement("div");
+      actions.className = "zhenyi-bubble-actions";
+      bubble.insertBefore(actions, bubble.querySelector(".zhenyi-bubble-foot"));
+    }
+    actions.replaceChildren();
+    const mk = (label, title, fn) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "zhenyi-bubble-act";
+      b.textContent = label;
+      b.title = title;
+      b.addEventListener("click", (e) => {
+        if (!e.isTrusted || !isCurrent()) return;
+        e.stopPropagation();
+        fn();
+      });
+      return b;
+    };
+    if (window.speechSynthesis && window.SpeechSynthesisUtterance) {
+      actions.appendChild(mk("朗读", "朗读原文", () => speakText(bubbleResult?.text)));
+    }
+    actions.appendChild(mk("收藏", "收藏到生词本（仅存本机）", () => saveVocab(text, translation)));
+  }
+
   function doSelectionTranslate(text, x, y) {
     // 屏幕阅读方向：英文 → 中文；如果选中的本身是中文则 → 英文
     const target = hasCJK(text) ? "en" : settings.selTargetLang;
+    bubbleResult = null;
     showBubble(x, y, true);
     translate(text, target)
       .then((out) => {
+        bubbleResult = { text, out };
         bubble.querySelector(".zhenyi-bubble-body").textContent = out;
+        renderBubbleActions(text, out);
         bubble.querySelector(".zhenyi-bubble-foot").textContent =
           target === "en" ? "英文翻译 · 点击可复制" : "中文翻译 · 点击可复制";
         bubble.classList.add("zhenyi-show");
@@ -569,6 +659,7 @@
       '<p class="zhenyi-work-status" role="status" aria-live="polite"></p>' +
       '<p class="zhenyi-work-hint" data-part="scene"></p>' +
       '<div data-part="writing"><label>译文 / 回复预览（可编辑）<textarea data-field="result" rows="4" maxlength="10000" placeholder="生成后在这里确认内容"></textarea></label>' +
+      '<div class="zhenyi-work-termrow"><button type="button" data-act="term">存为术语</button><span class="zhenyi-work-hint">把这对译文固定下来，之后翻译自动应用</span></div>' +
       '<div class="zhenyi-work-checks"><strong>发送前查漏</strong><p class="zhenyi-work-hint">基础核对只提示差异，不代表翻译正确。AI 查漏可进一步检查含义和漏译。</p><ul data-part="checks"></ul><button type="button" data-act="check">AI 查漏</button></div>' +
       '<p class="zhenyi-work-hint" data-part="target-hint"></p></div>' +
       '<div data-part="offer-result" hidden></div>' +
@@ -630,6 +721,7 @@
       part("focus").hidden = current !== "offer";
       part("offer-result").hidden = current !== "offer";
       part("source-label").textContent = current === "offer" ? "原文（可编辑选取范围）" : "中文原意 / 原文";
+      action("term").hidden = current !== "translate";   // 只有翻译预览才是术语对
       field("source").maxLength = current === "offer" ? 20000 : 5000;
       field("source").value = current === "offer" ? selected || pageText : options.source ?? original;
       field("result").value = "";
@@ -723,6 +815,27 @@
     action("undo").addEventListener("click", trusted(() => {
       if (!targetEl || !restoreInput(targetEl)) { notify("输入框已被修改，无法安全还原。", true); return; }
       applied = false; edited = false; updateActions(); notify("已还原原文。");
+    }));
+    action("term").addEventListener("click", trusted(async () => {
+      const source = field("source").value.trim();
+      const result = field("result").value.trim();
+      if (!source || !result) { notify("先生成或填写译文，才能存为术语。", true); return; }
+      if (source.length > 80 || result.length > 80) { notify("术语只适合固定短语，两侧各最多 80 字符。", true); return; }
+      action("term").disabled = true;
+      notify("正在保存术语…");
+      try {
+        const resp = await new Promise((resolve, reject) => {
+          try {
+            chrome.runtime.sendMessage({ type: "ADD_TERM", source, result }, (r) => {
+              if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+              if (r && r.ok) resolve(r); else reject(new Error((r && r.error) || "保存失败，请重试"));
+            });
+          } catch (error) { reject(error); }
+        });
+        const what = resp.action === "updated" ? "已更新术语" : resp.action === "duplicate" ? "术语已存在" : "已存为术语";
+        notify(what + "：" + resp.line + "（共 " + resp.count + " 条）");
+      } catch (error) { notify(error.message, true); }
+      finally { if (alive()) action("term").disabled = false; }
     }));
     action("copy").addEventListener("click", trusted(async () => {
       try {
@@ -1594,7 +1707,7 @@
   const PAGE_SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "CODE", "PRE", "KBD", "SAMP", "VAR",
     "TEXTAREA", "INPUT", "SELECT", "OPTION", "BUTTON", "SVG", "CANVAS", "IFRAME", "VIDEO", "AUDIO", "OBJECT", "EMBED", "MATH"]);
   // 遵守网页自己的 translate="no" / .notranslate，并跳过扩展自己的界面
-  const PAGE_SKIP_SELECTOR = '.zhenyi-input-btn,.zhenyi-bubble,.zhenyi-explain,.zhenyi-sel-icon,.zhenyi-pagebar,.notranslate,[translate="no"]';
+  const PAGE_SKIP_SELECTOR = '.zhenyi-input-btn,.zhenyi-bubble,.zhenyi-explain,.zhenyi-sel-icon,.zhenyi-pagebar,.zhenyi-orig,.notranslate,[translate="no"]';
   const PAGE_LABELS = { en: "英文", "zh-CN": "简体中文", "zh-TW": "繁体中文" };
   const PAGE_BATCH_CHARS = 1500;   // 一批最多多少字符（可含多段）
   const PAGE_BATCH_ITEMS = 12;     // 一批最多多少段
@@ -1605,10 +1718,10 @@
   let pageBlocked = new WeakSet();   // 已经建过翻译单元的元素
   let pageOwnDone = new WeakSet();   // 元素自有的直接文本已处理（子元素仍可继续变化）
   const pageState = {
-    active: false, stopped: false, target: "zh-CN",
+    active: false, stopped: false, target: "zh-CN", mode: "replace",
     records: [], byEl: new Map(), parts: new Map(), queue: [], inflight: 0,
     done: 0, failed: 0, chars: 0, requests: 0, seq: 0, session: 0, note: "", timer: 0, pumpTimer: 0,
-    chip: null, io: null, mo: null, expanded: false,
+    chip: null, io: null, mo: null, expanded: false, origEls: new Set(),
   };
 
   const pageSkipped = el => !el || PAGE_SKIP_TAGS.has(el.tagName) || !!el.closest?.(PAGE_SKIP_SELECTOR);
@@ -1622,6 +1735,26 @@
     if (!letters) return "";
     if (target === "en") return cjk ? value : "";
     return cjk / letters > 0.5 ? "" : value;
+  }
+
+  /* 双语对照：译文写进文本节点后，紧随其后插入一个灰色的原文 span。
+   * 这是唯一会新增元素的地方——「不改网站 UI」的原则对照模式明确豁免，
+   * span 带扩展自己的类名，还原时连同译文一起全部移除。 */
+  function insertOrigAfter(node, original) {
+    if (!node || !node.isConnected || !node.parentNode) return;
+    const text = String(original || "").trim();
+    if (!text) return;
+    const span = document.createElement("span");
+    span.className = "zhenyi-orig";
+    span.title = "原文（中英互译助手 · 对照模式）";
+    span.textContent = text;
+    node.parentNode.insertBefore(span, node.nextSibling);
+    pageState.origEls.add(span);
+  }
+
+  function removeOrigSpans() {
+    for (const el of pageState.origEls) if (el.isConnected) el.remove();
+    pageState.origEls.clear();
   }
 
   function pageTextNodes(el) {
@@ -1723,6 +1856,7 @@
     if (!rec.node.isConnected) return;
     rec.applied = rec.lead + text + rec.trail;
     rec.node.nodeValue = rec.applied;
+    if (pageState.mode === "bilingual") insertOrigAfter(rec.node, rec.original);
   }
 
   function fillPageRecord(rec, text) {
@@ -1740,7 +1874,10 @@
       const joined = bucket.texts.join(" ");
       const applied = rec.lead + joined + rec.trail;
       for (const item of bucket.records) item.applied = applied;   // 还原时靠它判断“还是我们写的”
-      if (rec.node.isConnected) rec.node.nodeValue = applied;
+      if (rec.node.isConnected) {
+        rec.node.nodeValue = applied;
+        if (pageState.mode === "bilingual") insertOrigAfter(rec.node, rec.original);
+      }
       updatePageChip();
       return;
     }
@@ -1896,10 +2033,23 @@
     else updatePageChip();
   }
 
+  /* 徽章：告诉后台当前标签页的整页翻译状态，工具栏图标显示/清除「译」 */
+  function notifyPageState(active) {
+    try {
+      chrome.runtime.sendMessage({ type: "PAGE_STATE", active }, () => void chrome.runtime.lastError);
+    } catch (e) { /* 后台不可达时徽章留在原地，不影响翻译 */ }
+  }
+
+  /* 导航离开时尽力清掉「译」徽章（新页面若是自动翻译站点会重新点亮） */
+  window.addEventListener("pagehide", () => {
+    if (pageState.active) notifyPageState(false);
+  }, { capture: true });
+
   function restorePage() {
     if (pageState.timer) { clearTimeout(pageState.timer); pageState.timer = 0; }
     if (pageState.pumpTimer) { clearTimeout(pageState.pumpTimer); pageState.pumpTimer = 0; }
     stopPageTranslate();
+    removeOrigSpans();   // 对照模式的原文 span 是我们自己插入的，还原时全部移除
     for (const rec of pageState.records) {
       // 只还原“还是我们写的那句”：网站自己改过的文字不动
       if (rec.node.isConnected && rec.node.nodeValue === rec.applied) rec.node.nodeValue = rec.original;
@@ -1920,6 +2070,7 @@
     pageOwnDone = new WeakSet();
     pageState.chip?.remove();
     pageState.chip = null;
+    notifyPageState(false);
   }
 
   /* 动态内容（无限滚动、SPA）登记为新单元，同样只翻可见的。 */
@@ -1949,6 +2100,7 @@
       '<span class="zhenyi-pagebar-status" role="status" aria-live="polite"></span>' +
       '<label class="zhenyi-pagebar-field">目标<select data-page="target" aria-label="整页翻译目标语言">' +
       '<option value="zh-CN">简体中文</option><option value="zh-TW">繁体中文</option><option value="en">英文</option></select></label>' +
+      '<button type="button" data-page="mode">对照原文</button>' +
       '<button type="button" data-page="stop">停止</button>' +
       '<button type="button" data-page="restore">还原原文</button>' +
       '</div>' +
@@ -1985,7 +2137,29 @@
       settings.pageTargetLang = value;
       startPageTranslate(value).catch(error => setPageStatus("翻译失败：" + error.message));
     });
+    on("mode", () => {
+      if (!pageState.active) return;
+      setPageMode(pageState.mode === "bilingual" ? "replace" : "bilingual");
+    });
     return bar;
+  }
+
+  /* 对照/仅译文即时切换：已翻好的段落立即补上或移除原文，不用重翻 */
+  function setPageMode(mode) {
+    pageState.mode = mode;
+    settings.pageMode = mode;
+    try { chrome.storage.sync.set({ pageMode: mode }); } catch (e) {}
+    const btn = pageState.chip?.querySelector('[data-page="mode"]');
+    if (btn) btn.textContent = mode === "bilingual" ? "切换为仅译文" : "对照原文";
+    if (mode === "bilingual") {
+      for (const rec of pageState.records) {
+        if (!rec.done || !rec.node.isConnected || rec.node.nodeValue !== rec.applied) continue;
+        if (rec.parts > 1 && rec.part !== 0) continue;   // 多块节点只插一处原文
+        insertOrigAfter(rec.node, rec.original);
+      }
+    } else {
+      removeOrigSpans();
+    }
   }
 
   async function startPageTranslate(target) {
@@ -2000,6 +2174,7 @@
       if (stop) stop.textContent = "停止";
       updatePageChip();
       pumpPage();
+      notifyPageState(true);
       return { total: pageState.records.length, resumed: true };
     }
     if (pageState.active) restorePage();
@@ -2007,6 +2182,7 @@
     pageState.stopped = false;
     pageState.session++;
     pageState.target = wanted;
+    pageState.mode = settings.pageMode === "bilingual" ? "bilingual" : "replace";
     pageState.records = [];
     pageState.byEl = new Map();
     pageState.parts.clear();
@@ -2021,11 +2197,14 @@
     pageOwnDone = new WeakSet();
     const chip = ensurePageChip();
     chip.querySelector('[data-page="target"]').value = wanted;
+    const modeBtn = chip.querySelector('[data-page="mode"]');
+    if (modeBtn) modeBtn.textContent = pageState.mode === "bilingual" ? "切换为仅译文" : "对照原文";
     const fresh = registerPageUnits(collectPageUnits(document.body, wanted));
     observePageUnits(fresh);
     watchPage();
     updatePageChip();
     pumpPage();
+    notifyPageState(true);
     return { total: pageState.records.length, chars: pageState.chars };
   }
 
