@@ -652,12 +652,24 @@ const SCENES = new Set(Object.keys(SCENE_LINES));
 const sceneLine = scene => SCENE_LINES[SCENES.has(scene) ? scene : "generic"];
 
 async function googleTranslateBG(text, targetLang) {
-  const url =
-    "https://translate.googleapis.com/translate_a/single?client=gtx&dt=t" +
-    "&sl=auto&tl=" + encodeURIComponent(targetLang) +
+  const params =
+    "client=gtx&dt=t&sl=auto&tl=" + encodeURIComponent(targetLang) +
     "&q=" + encodeURIComponent(text);
+  const url = "https://translate.googleapis.com/translate_a/single?" + params;
   bumpUsage(text.length, 1);   // 真实发出请求才计数，缓存命中不经过这里
-  const res = await fetch(url);
+  // 长文本的 URL 会超出服务端长度限制（如 5000 个中文字符 ≈ 45KB），改走 POST 表单提交；
+  // 服务端拒绝 POST 时退回 GET，行为与旧版一致
+  let res;
+  if (text.length > 1500) {
+    res = await fetch("https://translate.googleapis.com/translate_a/single", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params,
+    });
+    if (!res.ok) res = await fetch(url);
+  } else {
+    res = await fetch(url);
+  }
   if (!res.ok) throw new Error("HTTP " + res.status);
   const data = await res.json();
   return (data[0] || []).map((seg) => seg && seg[0]).join("");
@@ -691,7 +703,7 @@ async function handleTranslate(msg) {
   const text = String(msg.text || "");
   if (text.length > 5000) throw new Error("文本超过 5000 字符，请分段翻译；原文已保留");
   const target = msg.target || "zh-CN";
-  languageName(target);
+  languageName(target);   // 校验目标语言（en / zh-CN / zh-TW），不支持直接报错
   if (!text.trim()) throw new Error("文本为空");
   const terms = parseGlossary((await chrome.storage.local.get("glossary")).glossary || "");
   const protectedText = protectTerms(text, terms, target);
@@ -741,7 +753,7 @@ async function handleTranslateBlocks(msg) {
   const browserMode = s.provider === "browser";
   if (!aiMode && !browserMode) throw new Error("整页翻译需要 AI 或浏览器引擎：请在扩展设置里选择并配置");
   const target = msg.target || "zh-CN";
-  languageName(target);
+  languageName(target);   // 校验目标语言（en / zh-CN / zh-TW），不支持直接报错
   const raw = Array.isArray(msg.items) ? msg.items.slice(0, BLOCKS_MAX_ITEMS) : [];
   if (!raw.length) throw new Error("没有需要翻译的段落");
   let chars = 0;
@@ -1007,7 +1019,11 @@ async function chatOnce(s, msgs, onChunk) {
     ? { model: s.aiModel, thinking: { type: "disabled" }, temperature: 0.3, stream: !!onChunk, messages: msgs }
     : { model: s.aiModel, temperature: 0.3, stream: !!onChunk, messages: msgs };
 
-  bumpUsage(msgs.reduce((n, m) => n + String(m?.content || "").length, 0), 1);   // 提示词字符数，估算用量
+  // 提示词字符数，估算用量（多模态消息只计文字部分，不把截图 data URL 算进去）
+  const contentLen = (c) => Array.isArray(c)
+    ? c.reduce((n, part) => n + String((part && part.text) || "").length, 0)
+    : String(c || "").length;
+  bumpUsage(msgs.reduce((n, m) => n + contentLen(m && m.content), 0), 1);
   const res = await fetch(base + "/chat/completions", {
     method: "POST",
     headers: {
@@ -1077,10 +1093,23 @@ async function chatOnce(s, msgs, onChunk) {
 }
 
 /* ---------- 自愈注入：扩展刷新/重启后，自动给所有已打开页面补注 content script ----------
- * Service Worker 每次启动（含 chrome://extensions 点刷新）都会执行这里。
  * 先 PING 检测：活着的脚本会应答，跳过；不应答（未注入/旧脚本已失效）就重新注入。
- */
-(async function selfHealInject() {
+ * Service Worker 会被消息/定时器反复冷启动，而 content script 不随 SW 一起死掉，
+ * 所以常规启动只做节流检查（30 分钟一次）；安装/更新/重载（onInstalled）与浏览器启动
+ * （onStartup）才是真正会丢注入的时机，强制做一次全量补注。 */
+const SELF_HEAL_KEY = "selfHealAt";
+const SELF_HEAL_INTERVAL = 30 * 60 * 1000;
+
+async function selfHealInject(force = false) {
+  const store = agentStore();
+  try {
+    if (!force) {
+      const obj = await store.get(SELF_HEAL_KEY);
+      const at = obj && obj[SELF_HEAL_KEY];
+      if (at && Date.now() - at < SELF_HEAL_INTERVAL) return;
+    }
+    await store.set({ [SELF_HEAL_KEY]: Date.now() });
+  } catch (e) { /* 节流记录失败不阻塞自愈 */ }
   try {
     const tabs = await chrome.tabs.query({});
     // 并行探测所有标签页；只处理普通 http(s) 页面，跳过 chrome://、扩展页与已休眠的标签
@@ -1092,7 +1121,9 @@ async function chatOnce(s, msgs, onChunk) {
   } catch (e) {
     console.warn("[中英互译助手] 自愈注入失败:", e.message);
   }
-})();
+}
+
+selfHealInject();   // SW 冷启动：节流后执行（30 分钟内的重复启动直接跳过）
 
 async function callAI(s, imageDataUrl, pageText, withImage, onChunk) {
   const base = (s.aiBaseUrl || "").replace(/\/+$/, "");
@@ -1257,9 +1288,13 @@ async function maybeAutoCheckUpdate() {
 
 chrome.runtime.onInstalled.addListener(() => {
   try { chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 720 }); } catch (e) {}
+  selfHealInject(true);   // 安装/更新/重载后旧注入全部失效，强制补注一次
   maybeAutoCheckUpdate();
 });
-chrome.runtime.onStartup.addListener(() => maybeAutoCheckUpdate());
+chrome.runtime.onStartup.addListener(() => {
+  selfHealInject(true);   // 浏览器启动后已打开页面可能没有 content script，强制补注一次
+  maybeAutoCheckUpdate();
+});
 if (chrome.alarms) {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm && alarm.name === UPDATE_ALARM) maybeAutoCheckUpdate();

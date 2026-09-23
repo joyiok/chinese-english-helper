@@ -162,6 +162,8 @@
   user-select: none;
 }
 
+.zhenyi-explain-head:active { cursor: grabbing; }
+
 .zhenyi-explain-brand {
   width: 22px;
   height: 22px;

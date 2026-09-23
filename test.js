@@ -227,8 +227,28 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   assert.equal((await call({ type: "TRANSLATE", text: "续费价 VPS", target: "en" }, 7)).out, "renewal price VPS");
   const originalSettings = sandbox.chrome.storage.sync.get;
   sandbox.chrome.storage.sync.get = async () => ({ provider: "google" });
-  sandbox.fetch = async url => new Response(JSON.stringify([[[new URL(url).searchParams.get("q")]]]));
+  let googleMethods = [];
+  sandbox.fetch = async (url, opts) => {
+    googleMethods.push(opts && opts.method === "POST" ? "POST" : "GET");
+    const q = opts && opts.body ? new URLSearchParams(opts.body).get("q") : new URL(url).searchParams.get("q");
+    return new Response(JSON.stringify([[[q]]]));
+  };
   assert.equal((await call({ type: "TRANSLATE", text: "renewal price VPS", target: "zh-CN" }, 7)).out, "续费价 VPS");
+  /* 长文本改走 POST 表单（URL 会超出服务端限制）；短文本维持 GET */
+  googleMethods = [];
+  const longText = "好天气 ".repeat(500).trim();
+  assert.equal((await call({ type: "TRANSLATE", text: longText, target: "en" }, 7)).out, longText);
+  assert.deepEqual(googleMethods, ["POST"]);
+  /* POST 被服务端拒绝时退回 GET，行为与旧版一致 */
+  googleMethods = [];
+  sandbox.fetch = async (url, opts) => {
+    googleMethods.push(opts && opts.method === "POST" ? "POST" : "GET");
+    if (opts && opts.method === "POST") return new Response("method not allowed", { status: 405 });
+    return new Response(JSON.stringify([[[new URL(url).searchParams.get("q")]]]));
+  };
+  const longText2 = "好天气 ".repeat(600).trim();
+  assert.equal((await call({ type: "TRANSLATE", text: longText2, target: "en" }, 7)).out, longText2);
+  assert.deepEqual(googleMethods, ["POST", "GET"], "POST 被拒绝应退回 GET");
   assert.equal((await call({ type: "DRAFT_REPLY", source: "你好", context: "Hello", tone: "polite", target: "en" }, 7)).ok, false);
   sandbox.chrome.storage.sync.get = originalSettings;
 
@@ -567,6 +587,17 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   assert.equal(openedTabs.at(-1).url, "https://github.com/joyiok/chinese-english-helper/archive/refs/heads/main.zip");
   notifClick("别的通知");
   assert.equal(openedTabs.length, 1, "无关通知不得打开标签页");
+
+  /* 自愈注入按节流执行：SW 频繁冷启动不再全量 ping 所有标签页；安装/启动强制补注 */
+  await sleep(20);   // 等 installHandler 触发的强制自愈完成并记下时间戳
+  const realQuery = sandbox.chrome.tabs.query;
+  let tabQueries = 0;
+  sandbox.chrome.tabs.query = async () => { tabQueries++; return []; };
+  await sandbox.selfHealInject();
+  assert.equal(tabQueries, 0, "节流窗口内重复冷启动不再全量 ping");
+  await sandbox.selfHealInject(true);
+  assert.equal(tabQueries, 1, "安装/启动时强制自愈补注");
+  sandbox.chrome.tabs.query = realQuery;
 
   /* 自动检查受设置开关控制：checkUpdates=false 时零请求 */
   const syncGetSaved = sandbox.chrome.storage.sync.get;

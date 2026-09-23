@@ -51,10 +51,14 @@
     setTimeout(maybeAutoPageTranslate, 0);
   });
   chrome.storage.onChanged.addListener((changes) => {
+    // usage/tcache/vocab 等高频写入不算设置变化：不清缓存、不重绘按钮。
+    // 否则后台每次计费/落缓存都会让所有页面丢掉译文缓存并做一次布局读取。
+    const keys = Object.keys(changes).filter((k) => k in DEFAULTS || k === "glossary");
+    if (!keys.length) return;
     translationSettingsVersion++;
-    cache.clear();
-    for (const [k, v] of Object.entries(changes)) {
-      if (k in DEFAULTS) settings[k] = v.newValue === undefined ? DEFAULTS[k] : v.newValue;
+    cache.clear();   // 设置或术语表变了：旧译文全部作废（与后台缓存作废保持一致）
+    for (const k of keys) {
+      if (k in DEFAULTS) settings[k] = changes[k].newValue === undefined ? DEFAULTS[k] : changes[k].newValue;
     }
     syncButtonVisibility();
   });
@@ -1687,32 +1691,9 @@
       if (e.key === "Enter") { e.preventDefault(); ask(e); }
     });
 
-    // 拖动
-    const head = panel.querySelector(".zhenyi-explain-head");
-    let dragging = false, dx = 0, dy = 0;
-    head.addEventListener("mousedown", (e) => {
-      if (e.target.tagName === "BUTTON") return;
-      dragging = true;
-      const r = panel.getBoundingClientRect();
-      dx = e.clientX - r.left;
-      dy = e.clientY - r.top;
-      panel.style.right = "auto";
-      head.style.cursor = "grabbing";
-      e.preventDefault();
-    });
-    window.addEventListener("mousemove", (e) => {
-      if (!dragging) return;
-      const r = panel.getBoundingClientRect();
-      const maxLeft = Math.max(0, window.innerWidth - r.width);
-      const maxTop = Math.max(0, window.innerHeight - r.height);
-      panel.style.left = Math.max(0, Math.min(e.clientX - dx, maxLeft)) + "px";
-      panel.style.top = Math.max(0, Math.min(e.clientY - dy, maxTop)) + "px";
-    });
-    window.addEventListener("mouseup", () => {
-      dragging = false;
-      if (head) head.style.cursor = "grab";
-    });
-
+    // 拖动由上面注册的 makeDraggable 统一处理（标题栏拖动、按钮不触发）：
+    // 这里曾另有一套手动拖动，两套监听器同时改 left/top，且每次构建面板都会向 window
+    // 泄漏一组 mousemove/mouseup 监听器，已移除。
     return panel;
   }
 

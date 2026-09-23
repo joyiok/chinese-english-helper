@@ -191,7 +191,10 @@ function renderCurrent() {
 }
 
 chrome.storage.local.get({ glossary: "" }, data => { $("glossary").value = data.glossary; });
-$("glossary").addEventListener("input", () => { $("glossaryStatus").textContent = "有未保存的修改"; });
+$("glossary").addEventListener("input", () => {
+  $("glossaryStatus").textContent = "有未保存的修改";
+  $("glossaryStatus").classList.remove("error");
+});
 $("saveGlossary").addEventListener("click", () => {
   $("saveGlossary").disabled = true;
   chrome.runtime.sendMessage({ type: "SAVE_GLOSSARY", text: $("glossary").value }, response => {
@@ -294,10 +297,15 @@ chrome.storage.local.get("usage", (obj) => { $("usageBadge").textContent = forma
 /* ---- 术语表导出 / 导入 ---- */
 $("exportGlossary").addEventListener("click", () => {
   const text = $("glossary").value;
-  if (!text.trim()) { $("glossaryStatus").textContent = "术语表为空，无可导出内容。"; return; }
+  if (!text.trim()) {
+    $("glossaryStatus").textContent = "术语表为空，无可导出内容。";
+    $("glossaryStatus").classList.remove("error");
+    return;
+  }
   try {
     downloadTextFile("中英互译术语表.txt", text);
     $("glossaryStatus").textContent = "已导出当前编辑框内容。";
+    $("glossaryStatus").classList.remove("error");
   } catch (e) {
     $("glossaryStatus").textContent = "导出失败：" + (e && e.message);
     $("glossaryStatus").classList.add("error");
@@ -314,6 +322,7 @@ $("importGlossaryFile").addEventListener("change", (e) => {
   reader.onload = () => {
     $("glossary").value = String(reader.result || "").slice(0, 12000);
     $("glossaryStatus").textContent = "已载入，检查后点「保存术语表」生效。";
+    $("glossaryStatus").classList.remove("error");
   };
   reader.onerror = () => glossaryStatusError("读取文件失败。", "glossaryStatus");
   reader.readAsText(file, "utf-8");
@@ -386,6 +395,7 @@ $("exportVocab").addEventListener("click", () => {
     try {
       downloadTextFile("生词本-Anki.txt", tsv);
       $("vocabStatus").textContent = "已导出 Anki 可导入的 TSV（制表符分隔）。";
+      $("vocabStatus").classList.remove("error");
     } catch (e) { vocabError("导出失败：" + (e && e.message)); }
   });
 });
@@ -410,6 +420,7 @@ $("clearVocabBtn").addEventListener("click", () => {
     void chrome.runtime.lastError;
     loadVocab();
     $("vocabStatus").textContent = "已清空。";
+    $("vocabStatus").classList.remove("error");
   });
 });
 
