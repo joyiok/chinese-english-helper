@@ -1,0 +1,216 @@
+const PRESETS = {
+  // 依据 DeepSeek 官方文档 (api-docs.deepseek.com)：base_url 不带 /v1，模型用 deepseek-flash（支持图像理解）
+  deepseek:    { baseUrl: "https://api.deepseek.com",        model: "deepseek-flash" },
+  openrouter:  { baseUrl: "https://openrouter.ai/api/v1",    model: "openai/gpt-4o-mini" },
+  siliconflow: { baseUrl: "https://api.siliconflow.cn/v1",   model: "Qwen/Qwen2.5-VL-72B-Instruct" },
+  openai:      { baseUrl: "https://api.openai.com/v1",       model: "gpt-4o-mini" },
+  custom:      { baseUrl: "",                                model: "" },
+};
+
+const defaults = {
+  enabled: true,
+  hotkeyEnabled: true,
+  selMode: "icon",
+  inputTargetLang: "en",
+  selTargetLang: "zh-CN",
+  pageTargetLang: "zh-CN",
+  provider: "google",
+  aiBaseUrl: PRESETS.deepseek.baseUrl,
+  aiModel: PRESETS.deepseek.model,
+  aiApiKey: "",
+};
+
+/* 旧版本配置自动迁移（deepseek-chat / 带 /v1 的旧地址 → deepseek-flash） */
+function migrate(s) {
+  const fixed = {};
+  if (s.aiModel === "deepseek-chat") fixed.aiModel = "deepseek-flash";
+  if (s.aiBaseUrl === "https://api.deepseek.com/v1") fixed.aiBaseUrl = "https://api.deepseek.com";
+  if (s.aiModel === "deepseek-ai/DeepSeek-V3") fixed.aiModel = "Qwen/Qwen2.5-VL-72B-Instruct";
+  if (Object.keys(fixed).length) chrome.storage.sync.set(fixed);
+  return { ...s, ...fixed };
+}
+
+chrome.storage.sync.get(defaults, (s) => renderUI(migrate(s)));
+// 注意：这里不要再 get 一次调用 renderUI，否则会用未迁移的旧值覆盖上面的渲染。
+
+const $ = (id) => document.getElementById(id);
+const fields = ["enabled", "hotkeyEnabled", "selMode", "inputTargetLang", "selTargetLang", "provider",
+                "aiBaseUrl", "aiModel", "aiApiKey"];
+
+function renderUI(s) {
+  fields.forEach((id) => {
+    const el = $(id);
+    if (el.type === "checkbox") el.checked = !!s[id];
+    else el.value = s[id] || "";
+  });
+  $("aiBox").classList.toggle("show", s.provider === "ai");
+  $("engineBadge").textContent = s.provider === "ai" ? "AI 模式" : "免费版";
+
+  // 根据当前 base url 高亮预设
+  const matched = Object.keys(PRESETS).find(
+    (k) => PRESETS[k].baseUrl && PRESETS[k].baseUrl === (s.aiBaseUrl || "")
+  );
+  $("aiPreset").value = matched || "custom";
+
+  // AI 模式权限状态提示
+  if (s.provider === "ai") {
+    try {
+      const origin = new URL(s.aiBaseUrl).origin + "/*";
+      chrome.permissions.contains({ origins: [origin] }, (has) => {
+        $("statusHint").innerHTML = has
+          ? "AI 翻译已就绪" + (s.aiApiKey ? "" : "（还需填写 API Key）")
+          : "需要授权访问 API 域名：切一下下拉框或重新选择 AI 模式即可授权";
+      });
+    } catch (e) {
+      $("statusHint").textContent = "API 地址格式不正确";
+    }
+  } else {
+    $("statusHint").textContent = "";
+  }
+}
+
+function save(patch) {
+  chrome.storage.sync.set(patch);
+}
+
+/* 开关/下拉：保存并刷新提示 */
+["enabled", "hotkeyEnabled", "selMode", "inputTargetLang", "selTargetLang", "provider"].forEach((id) => {
+  $(id).addEventListener("change", () => {
+    const value = $(id).type === "checkbox" ? $(id).checked : $(id).value;
+    save({ [id]: value });
+    renderUI({ ...defaults, ...currentValues() });
+    if (id === "provider" && value === "ai") ensurePermission();
+  });
+});
+
+/* 文本输入：防抖保存 */
+["aiBaseUrl", "aiModel", "aiApiKey"].forEach((id) => {
+  $(id).addEventListener("change", () => save({ [id]: $(id).value.trim() }));
+  $(id).addEventListener("input", debounce(() => save({ [id]: $(id).value.trim() }), 600));
+});
+
+/* 预设切换：自动填充地址和模型 */
+$("aiPreset").addEventListener("change", () => {
+  const p = PRESETS[$("aiPreset").value];
+  if (!p.baseUrl) return; // 自定义：不覆盖
+  $("aiBaseUrl").value = p.baseUrl;
+  $("aiModel").value = p.model;
+  save({ aiBaseUrl: p.baseUrl, aiModel: p.model });
+  renderUI({ ...defaults, ...currentValues() });
+  ensurePermission();
+});
+
+/* 向浏览器申请访问 AI API 域名的权限（manifest 已声明全网 host 权限，这里只做状态检测） */
+function ensurePermission() {
+  let origin;
+  try {
+    origin = new URL($("aiBaseUrl").value.trim()).origin + "/*";
+  } catch (e) {
+    return;
+  }
+  chrome.permissions.contains({ origins: [origin] }, (has) => {
+    if (!has) {
+      try { chrome.permissions.request({ origins: [origin] }, () => renderCurrent()); } catch (e) {}
+    }
+  });
+}
+
+/* ---- 当前页面连接状态诊断 ---- */
+function checkTab() {
+  const el = $("tabStatus");
+  if (!el) return;
+  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    if (!tab || !tab.id || !/^https?:/.test(tab.url || "")) {
+      el.textContent = "当前页面不支持扩展（浏览器内部页）";
+      el.className = "tab-status";
+      return;
+    }
+    chrome.tabs.sendMessage(tab.id, { type: "PING" }, (r) => {
+      if (chrome.runtime.lastError || !r) {
+        el.innerHTML = '当前页面未注入，翻译功能不可用 —— <a href="#" id="fixTabLink">点我修复</a>';
+        el.className = "tab-status bad";
+        const a = document.getElementById("fixTabLink");
+        if (a) {
+          a.onclick = (ev) => {
+            ev.preventDefault();
+            el.textContent = "正在注入…";
+            el.className = "tab-status";
+            chrome.runtime.sendMessage({ type: "INJECT_TAB", tabId: tab.id }, () => {
+              setTimeout(checkTab, 700);
+            });
+          };
+        }
+      } else {
+        el.textContent = "当前页面已连接，功能正常 (v" + (r.v || "?") + ")";
+        el.className = "tab-status ok";
+      }
+    });
+  });
+}
+checkTab();
+
+function currentValues() {
+  const v = {};
+  fields.forEach((id) => {
+    v[id] = $(id).type === "checkbox" ? $(id).checked : $(id).value;
+  });
+  return v;
+}
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+/* AI 看屏幕解读按钮 */
+$("explainBtn").addEventListener("click", () => {
+  chrome.storage.sync.get(defaults, (s) => {
+    if (s.provider !== "ai" || !s.aiApiKey) {
+      if (!confirm("AI 看屏幕需要先启用 AI 模式并填写 API Key。\n现在先试一次（未配置会提示错误）？")) return;
+    }
+    // 先发消息给后台，后台确认接收后再关弹窗（关早了消息会丢！）
+    chrome.runtime.sendMessage({ type: "EXPLAIN_PAGE" }, () => {
+      void chrome.runtime.lastError;
+      try { window.close(); } catch (e) {}
+    });
+  });
+});
+
+function renderCurrent() {
+  renderUI({ ...defaults, ...currentValues() });
+}
+
+chrome.storage.local.get({ glossary: "" }, data => { $("glossary").value = data.glossary; });
+$("glossary").addEventListener("input", () => { $("glossaryStatus").textContent = "有未保存的修改"; });
+$("saveGlossary").addEventListener("click", () => {
+  $("saveGlossary").disabled = true;
+  chrome.runtime.sendMessage({ type: "SAVE_GLOSSARY", text: $("glossary").value }, response => {
+    const error = chrome.runtime.lastError?.message || (!response?.ok ? response?.error || "保存失败，请重试" : "");
+    $("glossaryStatus").textContent = error || "已保存，将应用于下一次翻译和回复。";
+    $("glossaryStatus").classList.toggle("error", !!error);
+    $("saveGlossary").disabled = false;
+  });
+});
+for (const [id, mode] of [["replyBtn", "reply"], ["offerBtn", "offer"]]) {
+  $(id).addEventListener("click", () => {
+    $(id).disabled = true;
+    chrome.runtime.sendMessage({ type: "OPEN_WORKBENCH_REQUEST", mode }, response => {
+      const error = chrome.runtime.lastError?.message || (!response?.ok ? response?.error || "打开失败，请刷新网页后重试" : "");
+      if (error) {
+        $("toolStatus").textContent = error; $("toolStatus").classList.add("error"); $(id).disabled = false;
+      } else window.close();
+    });
+  });
+}
+
+/* 整页翻译：交给后台注入并通知内容脚本，开始后页面右下角出现页栏 */
+$("pageBtn").addEventListener("click", () => {
+  const btn = $("pageBtn");
+  btn.disabled = true;
+  chrome.runtime.sendMessage({ type: "TRANSLATE_PAGE_REQUEST" }, response => {
+    const error = chrome.runtime.lastError?.message || (!response?.ok ? response?.error || "无法开始整页翻译，请刷新网页后重试" : "");
+    if (error) {
+      $("toolStatus").textContent = error; $("toolStatus").classList.add("error"); btn.disabled = false;
+    } else window.close();
+  });
+});

@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "中英互译助手（写作与阅读）",
+  "version": "2.1.0",
+  "description": "整页双语对照翻译、中英翻译预览与还原、上下文回复、个人术语表、发送前查漏、关键信息提取，以及 AI 页面解读。适用于任意网页。",
+  "permissions": ["storage", "activeTab", "scripting", "notifications", "contextMenus"],
+  "host_permissions": [
+    "https://translate.googleapis.com/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["style.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "中英互译助手",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  }
+}
