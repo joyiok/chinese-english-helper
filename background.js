@@ -197,6 +197,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     setAgentState(tabId, null).then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
     return true;
   }
+  if (msg && msg.type === "CHECK_UPDATE") {
+    // 弹窗里手动「检查更新」/打开弹窗的节流自动检查：不发通知，结果直接回弹窗
+    checkForUpdate({ force: !!msg.force, notify: false })
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((e) => sendResponse({ ok: false, error: (e && e.message) || String(e) }));
+    return true;
+  }
   if (msg && msg.type === "INJECT_TAB" && msg.tabId) {
     // 弹窗「修复此页面」：手动向指定标签页注入（含所有 iframe）
     injectContentScript(msg.tabId)
@@ -853,3 +860,146 @@ async function callAI(s, imageDataUrl, pageText, withImage, onChunk) {
 
   return chatOnce(s, msgs, onChunk);
 }
+
+/* ---------- 在线更新检查 ----------
+ * 版本事实源：GitHub 仓库 main 分支的 manifest.json（raw 直链，无 API 限流）。
+ * 触发：alarms 定时器（12 小时）+ 浏览器启动/扩展安装更新 + 打开弹窗，统一按 lastCheck 节流。
+ * 发现新版本发系统通知（同一版本只提醒一次，扩展升上去后重置）；点通知直接下载 zip。
+ * 扩展不能改写自身目录，更新需手动完成：zip 解压覆盖本地目录后到 chrome://extensions 重载。
+ * 检查只请求仓库的 manifest.json，不上传任何用户数据；弹窗里可关闭自动检查。
+ */
+const UPDATE_REPO = "joyiok/chinese-english-helper";
+const UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/" + UPDATE_REPO + "/main/manifest.json";
+const UPDATE_ZIP_URL = "https://github.com/" + UPDATE_REPO + "/archive/refs/heads/main.zip";
+const UPDATE_COMMITS_URL = "https://github.com/" + UPDATE_REPO + "/commits/main";
+const UPDATE_ALARM = "zhenyi-update-check";
+const UPDATE_NOTIF_ID = "zhenyi-update";
+const UPDATE_THROTTLE_MS = 12 * 60 * 60 * 1000;
+const UPDATE_STATE_KEY = "updateState";
+
+/* 语义化版本比较：逐段按数字比较（2.10 > 2.9），缺段视为 0；
+ * 纯数字段视为正式版，大于带后缀的同段（2.2.0 > 2.2.0-beta）。 */
+function cmpVersion(a, b) {
+  const pa = String(a || "").trim().split(".");
+  const pb = String(b || "").trim().split(".");
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
+    const sa = pa[i] || "0";
+    const sb = pb[i] || "0";
+    const na = /^\d+$/.test(sa) ? parseInt(sa, 10) : null;
+    const nb = /^\d+$/.test(sb) ? parseInt(sb, 10) : null;
+    if (na !== null && nb !== null) {
+      if (na !== nb) return na < nb ? -1 : 1;
+    } else if (sa !== sb) {
+      if (na !== null) return 1;
+      if (nb !== null) return -1;
+      return sa < sb ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+async function getUpdateState() {
+  try {
+    const obj = await chrome.storage.local.get(UPDATE_STATE_KEY);
+    return (obj && obj[UPDATE_STATE_KEY]) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchLatestVersion() {
+  const res = await fetch(UPDATE_MANIFEST_URL, { cache: "no-store" });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const data = await res.json();
+  const v = String((data && data.version) || "").trim();
+  if (!/^\d+(\.\d+){0,3}$/.test(v)) throw new Error("仓库版本号不合法：" + (v || "（空）"));
+  return v;
+}
+
+/* force：绕过节流强制请求；notify：发现新版本时发系统通知（手动检查不发）。
+ * 永不抛错：失败时返回 status:"error"，并尽量带缓存结果供展示。 */
+async function checkForUpdate(opts = {}) {
+  const force = !!opts.force;
+  const notify = !!opts.notify;
+  const current = chrome.runtime.getManifest().version;
+  const state = (await getUpdateState()) || {};
+  const links = { downloadUrl: UPDATE_ZIP_URL, commitsUrl: UPDATE_COMMITS_URL };
+  const summarize = (latest, lastCheck) => ({
+    current,
+    latest: latest || null,
+    lastCheck: lastCheck || 0,
+    updateAvailable: !!latest && cmpVersion(latest, current) > 0,
+    ...links,
+  });
+
+  /* 12 小时内的非强制检查直接用缓存，不发请求 */
+  if (!force && state.lastCheck && Date.now() - state.lastCheck < UPDATE_THROTTLE_MS) {
+    return { ...summarize(state.latest, state.lastCheck), status: "cached" };
+  }
+
+  let latest = null;
+  let error = "";
+  try {
+    latest = await fetchLatestVersion();
+  } catch (e) {
+    error = (e && e.message) || String(e);
+  }
+  if (!latest) {
+    return { ...summarize(state.latest, state.lastCheck), status: "error", error: error || "未知错误" };
+  }
+
+  const now = Date.now();
+  const updateAvailable = cmpVersion(latest, current) > 0;
+  const next = {
+    lastCheck: now,
+    latest,
+    current,
+    updateAvailable,
+    notifiedVersion: updateAvailable ? (state.notifiedVersion || null) : null,
+  };
+  if (updateAvailable && notify && latest !== state.notifiedVersion) {
+    try {
+      chrome.notifications.create(UPDATE_NOTIF_ID, {
+        type: "basic",
+        iconUrl: "icon128.png",
+        title: "中英互译助手有新版本",
+        message: "新版本 v" + latest + " 已发布。点击下载更新包（zip），解压覆盖本地扩展目录后，到 chrome://extensions 重新加载。",
+      });
+      next.notifiedVersion = latest;
+    } catch (e) { /* 通知失败不影响检查结果 */ }
+  }
+  try { await chrome.storage.local.set({ [UPDATE_STATE_KEY]: next }); } catch (e) {}
+  return { ...summarize(latest, now), status: "ok" };
+}
+
+/* 自动检查入口（alarm / 启动 / 安装）：尊重用户开关，失败静默；防抖避免连发请求 */
+let updateAutoInFlight = false;
+async function maybeAutoCheckUpdate() {
+  try {
+    const s = await chrome.storage.sync.get({ checkUpdates: true });
+    if (s && s.checkUpdates === false) return;
+    if (updateAutoInFlight) return;
+    updateAutoInFlight = true;
+    try {
+      await checkForUpdate({ force: false, notify: true });
+    } finally {
+      updateAutoInFlight = false;
+    }
+  } catch (e) { /* 静默：自动检查失败不打扰 */ }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  try { chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 720 }); } catch (e) {}
+  maybeAutoCheckUpdate();
+});
+chrome.runtime.onStartup.addListener(() => maybeAutoCheckUpdate());
+if (chrome.alarms) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm && alarm.name === UPDATE_ALARM) maybeAutoCheckUpdate();
+  });
+}
+chrome.notifications.onClicked.addListener((id) => {
+  if (id !== UPDATE_NOTIF_ID) return;
+  chrome.tabs.create({ url: UPDATE_ZIP_URL });
+});

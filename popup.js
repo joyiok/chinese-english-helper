@@ -18,6 +18,7 @@ const defaults = {
   aiBaseUrl: PRESETS.deepseek.baseUrl,
   aiModel: PRESETS.deepseek.model,
   aiApiKey: "",
+  checkUpdates: true,
 };
 
 /* 旧版本配置自动迁移（deepseek-chat / 带 /v1 的旧地址 → deepseek-flash） */
@@ -30,12 +31,17 @@ function migrate(s) {
   return { ...s, ...fixed };
 }
 
-chrome.storage.sync.get(defaults, (s) => renderUI(migrate(s)));
+chrome.storage.sync.get(defaults, (s) => {
+  renderUI(migrate(s));
+  /* 打开弹窗顺带做一次节流过的更新检查（后台 12 小时内只发一次请求）；自动检查关闭则只提示 */
+  if (s.checkUpdates !== false) requestUpdateInfo(false);
+  else $("updateStatus").textContent = "自动检查已关闭，可点「检查更新」手动查询。";
+});
 // 注意：这里不要再 get 一次调用 renderUI，否则会用未迁移的旧值覆盖上面的渲染。
 
 const $ = (id) => document.getElementById(id);
 const fields = ["enabled", "hotkeyEnabled", "selMode", "inputTargetLang", "selTargetLang", "provider",
-                "aiBaseUrl", "aiModel", "aiApiKey"];
+                "aiBaseUrl", "aiModel", "aiApiKey", "checkUpdates"];
 
 function renderUI(s) {
   fields.forEach((id) => {
@@ -74,7 +80,7 @@ function save(patch) {
 }
 
 /* 开关/下拉：保存并刷新提示 */
-["enabled", "hotkeyEnabled", "selMode", "inputTargetLang", "selTargetLang", "provider"].forEach((id) => {
+["enabled", "hotkeyEnabled", "selMode", "inputTargetLang", "selTargetLang", "provider", "checkUpdates"].forEach((id) => {
   $(id).addEventListener("change", () => {
     const value = $(id).type === "checkbox" ? $(id).checked : $(id).value;
     save({ [id]: value });
@@ -214,3 +220,61 @@ $("pageBtn").addEventListener("click", () => {
     } else window.close();
   });
 });
+
+/* ---- 在线更新：当前版本 + 手动检查 + 后台返回结果渲染 ---- */
+$("versionBadge").textContent = "v" + chrome.runtime.getManifest().version;
+
+function requestUpdateInfo(manual) {
+  const btn = $("checkUpdateBtn");
+  btn.disabled = true;
+  $("updateStatus").classList.remove("error");
+  $("updateStatus").textContent = "正在向 GitHub 检查更新…";
+  chrome.runtime.sendMessage({ type: "CHECK_UPDATE", force: manual }, (r) => {
+    btn.disabled = false;
+    renderUpdateInfo(r, manual);
+  });
+}
+
+function renderUpdateInfo(r, manual) {
+  const el = $("updateStatus");
+  el.classList.remove("error");
+  const err = chrome.runtime.lastError?.message || (!r?.ok ? r?.error || "后台无响应" : "");
+  const info = err ? null : r.result;
+  /* 后台对 latest/current 做过严格数字校验，可以安全内插进 innerHTML */
+  if (!info) {
+    el.textContent = manual ? "检查失败：" + err : "";
+    if (manual) el.classList.add("error");
+    return;
+  }
+  const when = info.lastCheck ? "（" + formatWhen(info.lastCheck) + "检查）" : "";
+  if (info.updateAvailable) {
+    el.innerHTML =
+      "发现新版本 <b>v" + info.latest + "</b>（当前 v" + info.current + "）" +
+      (info.status === "error" ? "（本次离线，显示上次检查结果）" : "") + "<br>" +
+      '<a href="' + info.downloadUrl + '" target="_blank" rel="noopener">下载更新包</a> · ' +
+      '<a href="' + info.commitsUrl + '" target="_blank" rel="noopener">更新内容</a><br>' +
+      "zip 解压后覆盖本地扩展目录，到 chrome://extensions 重新加载；git 用户直接 pull。";
+    return;
+  }
+  if (info.status === "error") {
+    if (info.lastCheck) {
+      el.textContent = "已是最新版本 v" + info.current + when + "；本次检查未完成（" + info.error + "）";
+    } else {
+      el.textContent = manual ? "检查失败：" + info.error : "";
+      if (manual) el.classList.add("error");
+    }
+    return;
+  }
+  el.textContent = info.latest === info.current
+    ? "已是最新版本 v" + info.current + when
+    : "已是最新版本（本地 v" + info.current + "，GitHub v" + info.latest + "）" + when;
+}
+
+function formatWhen(ts) {
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return d.getMonth() + 1 + "月" + d.getDate() + "日 " + hh + ":" + mm + " ";
+}
+
+$("checkUpdateBtn").addEventListener("click", () => requestUpdateInfo(true));

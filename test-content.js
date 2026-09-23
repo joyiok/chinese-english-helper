@@ -409,6 +409,7 @@ function selectionSender(env, el) {
 
   /* 13. 划词方式立即保存，重新打开弹窗仍使用保存值。 */
   const popupStore = {};
+  const popupMsgs = [];
   const openPopup = async () => {
     const dom = new JSDOM(fs.readFileSync(path.join(__dirname, "popup.html"), "utf8"), { runScripts: "outside-only" });
     dom.window.chrome = {
@@ -417,6 +418,19 @@ function selectionSender(env, el) {
         set: (patch) => Object.assign(popupStore, patch),
       }, local: { get: (_defaults, cb) => cb({ glossary: "" }) } },
       tabs: { query: (_q, cb) => cb([]) },
+      runtime: {
+        lastError: null,
+        getManifest: () => ({ version: "2.2.0" }),
+        sendMessage: (msg, cb) => {
+          popupMsgs.push(msg);
+          setTimeout(() => cb && cb({ ok: true, result: {
+            status: "ok", current: "2.2.0", latest: "2.2.0", updateAvailable: false,
+            lastCheck: Date.now(),
+            downloadUrl: "https://example.test/update.zip",
+            commitsUrl: "https://example.test/commits",
+          } }), 0);
+        },
+      },
     };
     dom.window.eval(fs.readFileSync(path.join(__dirname, "popup.js"), "utf8"));
     await wait(10);
@@ -433,6 +447,28 @@ function selectionSender(env, el) {
   popup = await openPopup();
   assert.equal(popup.window.document.getElementById("selMode").value, "off");
   popup.window.close();
+
+  /* 13b. 在线更新：打开弹窗自动节流检查，手动按钮强制检查；关掉自动检查后不再发。 */
+  const autoBefore = popupMsgs.length;
+  let updPopup = await openPopup();
+  assert.ok(popupMsgs.slice(autoBefore).some(m => m.type === "CHECK_UPDATE" && m.force === false), "打开弹窗应自动做一次节流检查");
+  assert.equal(updPopup.window.document.getElementById("versionBadge").textContent, "v2.2.0");
+  updPopup.window.document.getElementById("checkUpdateBtn").click();
+  await wait(20);
+  assert.ok(popupMsgs.slice(autoBefore).some(m => m.type === "CHECK_UPDATE" && m.force === true), "手动点击应强制检查");
+  assert.match(updPopup.window.document.getElementById("updateStatus").textContent, /已是最新版本/);
+  updPopup.window.close();
+
+  const autoSwitch = updPopup.window.document.getElementById("checkUpdates");
+  autoSwitch.checked = false;
+  autoSwitch.dispatchEvent(new updPopup.window.Event("change"));
+  assert.equal(popupStore.checkUpdates, false);
+  const offBefore = popupMsgs.length;
+  const offPopup = await openPopup();
+  assert.equal(popupMsgs.slice(offBefore).filter(m => m && m.type === "CHECK_UPDATE").length, 0, "关闭自动检查后打开弹窗不得再查");
+  assert.match(offPopup.window.document.getElementById("updateStatus").textContent, /自动检查已关闭/);
+  offPopup.window.close();
+  delete popupStore.checkUpdates; /* 不影响后续用例的弹窗状态 */
 
   /* 整页翻译测试用的小工具：控制片、状态文案，以及不含文字的结构签名。 */
   const pagebarOf = (e) => e.doc.documentElement.querySelector(".zhenyi-pagebar");

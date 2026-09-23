@@ -1,6 +1,6 @@
 {
   "name": "chinese-english-helper",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "中英互译助手浏览器扩展 —— 本地测试脚手架（不影响扩展本身）",
   "scripts": {

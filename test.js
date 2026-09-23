@@ -4,9 +4,15 @@ const vm = require("node:vm");
 
 let menuClick;
 let msgListener;
+let notifClick;
+let installHandler;
 const sent = [];
 const sessionStore = {};
 const localStore = {};
+const notifs = [];
+const openedTabs = [];
+const alarmCreates = [];
+const CURRENT_VERSION = JSON.parse(fs.readFileSync("manifest.json", "utf8")).version;
 const tabEvents = () => {
   const listeners = new Set();
   return { addListener: fn => listeners.add(fn), removeListener: fn => listeners.delete(fn),
@@ -22,14 +28,24 @@ const sandbox = {
   chrome: {
     runtime: {
       lastError: null,
+      getManifest: () => ({ version: CURRENT_VERSION }),
       onMessage: { addListener(fn) { msgListener = fn; } },
+      onStartup: { addListener() {} },
+      onInstalled: { addListener(fn) { installHandler = fn; } },
     },
     contextMenus: {
       remove(_id, done) { done(); },
       create(_menu, done) { done(); },
       onClicked: { addListener(fn) { menuClick = fn; } },
     },
-    notifications: { create() {} },
+    notifications: {
+      create(...args) { notifs.push(args); },
+      onClicked: { addListener(fn) { notifClick = fn; } },
+    },
+    alarms: {
+      create(name, info) { alarmCreates.push({ name, info }); },
+      onAlarm: { addListener() {} },
+    },
     scripting: { async executeScript() {}, async insertCSS() {} },
     storage: {
       sync: {
@@ -51,6 +67,7 @@ const sandbox = {
     },
     tabs: {
       async query() { return []; },
+      create(opts) { openedTabs.push(opts); },
       onRemoved: { addListener() {} },
       onActivated: tabEvents(),
       onUpdated: tabEvents(),
@@ -451,6 +468,104 @@ const call = (msg, tabId) => new Promise((resolve) => {
   assert.equal(blockInjected.ok, true);
   assert.doesNotMatch(captured.messages[0].content, /ignore previous instructions/i);
   assert.match(captured.messages[1].content, /ignore previous instructions/i);
+
+  /* ---- 在线更新：版本比较 / 节流缓存 / 通知去重 / 错误兜底 / 设置开关 ---- */
+  assert.equal(sandbox.cmpVersion("2.1.0", "2.2.0"), -1);
+  assert.equal(sandbox.cmpVersion("2.2.0", "2.2.0"), 0);
+  assert.equal(sandbox.cmpVersion("2.10.0", "2.9.0"), 1, "逐段按数字比较：2.10 > 2.9");
+  assert.equal(sandbox.cmpVersion("2.2", "2.2.0"), 0, "缺段视为 0");
+  assert.equal(sandbox.cmpVersion("2.2.0", "2.2.0-beta"), 1, "正式版大于预发布");
+  assert.equal(sandbox.cmpVersion("1.9.9", "2.0.0"), -1);
+
+  const upstream = "9.9.9";
+  let updateFetches = 0;
+  let updateUrl = "";
+  sandbox.fetch = async (url) => {
+    updateFetches++;
+    updateUrl = url;
+    return new Response(JSON.stringify({ version: upstream }));
+  };
+  const upd = await sandbox.checkForUpdate({ force: true, notify: true });
+  assert.equal(upd.status, "ok");
+  assert.equal(upd.current, CURRENT_VERSION);
+  assert.equal(upd.latest, upstream);
+  assert.equal(upd.updateAvailable, true);
+  assert.equal(updateUrl, "https://raw.githubusercontent.com/joyiok/chinese-english-helper/main/manifest.json");
+  assert.equal(notifs.length, 1, "发现新版本应发通知");
+  assert.equal(notifs[0][0], "zhenyi-update");
+  assert.match(notifs[0][1].message, /v9\.9\.9/);
+  assert.equal(localStore.updateState.notifiedVersion, upstream);
+  assert.equal(localStore.updateState.updateAvailable, true);
+
+  /* 节流：12 小时内的非强制检查直接用缓存，不再发请求 */
+  const cached = await sandbox.checkForUpdate({ force: false, notify: true });
+  assert.equal(cached.status, "cached");
+  assert.equal(cached.latest, upstream);
+  assert.equal(cached.updateAvailable, true);
+  assert.equal(updateFetches, 1, "节流期内不得重复请求");
+
+  /* 同一版本只提醒一次：强制重查也不重复通知 */
+  const again = await sandbox.checkForUpdate({ force: true, notify: true });
+  assert.equal(again.status, "ok");
+  assert.equal(again.updateAvailable, true);
+  assert.equal(notifs.length, 1, "同一版本不得重复通知");
+  assert.equal(updateFetches, 2);
+
+  /* 手动检查（notify=false）不发通知 */
+  const manual = await sandbox.checkForUpdate({ force: true, notify: false });
+  assert.equal(manual.status, "ok");
+  assert.equal(manual.updateAvailable, true);
+  assert.equal(notifs.length, 1);
+
+  /* 仓库版本不高于本地（开发中/回滚）：不算更新，并清掉去重标记 */
+  sandbox.fetch = async () => new Response(JSON.stringify({ version: "1.0.0" }));
+  const ahead = await sandbox.checkForUpdate({ force: true, notify: true });
+  assert.equal(ahead.status, "ok");
+  assert.equal(ahead.updateAvailable, false);
+  assert.equal(notifs.length, 1);
+  assert.equal(localStore.updateState.notifiedVersion, null);
+
+  /* 坏版本号 / 网络失败：返回 error 状态并回退展示上次成功缓存 */
+  sandbox.fetch = async () => new Response(JSON.stringify({ version: "x.y.z" }));
+  const badVersion = await sandbox.checkForUpdate({ force: true });
+  assert.equal(badVersion.status, "error");
+  assert.match(badVersion.error, /不合法/);
+  sandbox.fetch = async () => { throw new Error("网络断开"); };
+  const netFail = await sandbox.checkForUpdate({ force: true });
+  assert.equal(netFail.status, "error");
+  assert.match(netFail.error, /网络断开/);
+  assert.equal(netFail.latest, "1.0.0", "失败时应回退展示缓存版本");
+  assert.equal(netFail.lastCheck, localStore.updateState.lastCheck);
+
+  /* 弹窗通道：CHECK_UPDATE 消息返回完整结果（含下载与更新内容链接） */
+  sandbox.fetch = async () => new Response(JSON.stringify({ version: upstream }));
+  const viaMsg = await call({ type: "CHECK_UPDATE", force: true });
+  assert.equal(viaMsg.ok, true);
+  assert.equal(viaMsg.result.updateAvailable, true);
+  assert.equal(viaMsg.result.latest, upstream);
+  assert.equal(viaMsg.result.current, CURRENT_VERSION);
+  assert.equal(viaMsg.result.downloadUrl, "https://github.com/joyiok/chinese-english-helper/archive/refs/heads/main.zip");
+  assert.equal(viaMsg.result.commitsUrl, "https://github.com/joyiok/chinese-english-helper/commits/main");
+
+  /* 安装/更新时注册 12 小时定时器，点通知打开更新包下载页 */
+  const alarmsBefore = alarmCreates.length;
+  installHandler();
+  assert.equal(alarmCreates.length, alarmsBefore + 1);
+  assert.equal(alarmCreates.at(-1).name, "zhenyi-update-check");
+  assert.equal(alarmCreates.at(-1).info.periodInMinutes, 720);
+  notifClick("zhenyi-update");
+  assert.equal(openedTabs.at(-1).url, "https://github.com/joyiok/chinese-english-helper/archive/refs/heads/main.zip");
+  notifClick("别的通知");
+  assert.equal(openedTabs.length, 1, "无关通知不得打开标签页");
+
+  /* 自动检查受设置开关控制：checkUpdates=false 时零请求 */
+  const syncGetSaved = sandbox.chrome.storage.sync.get;
+  let autoFetches = 0;
+  sandbox.chrome.storage.sync.get = async () => ({ checkUpdates: false });
+  sandbox.fetch = async () => { autoFetches++; return new Response(JSON.stringify({ version: upstream })); };
+  await sandbox.maybeAutoCheckUpdate();
+  assert.equal(autoFetches, 0, "关掉自动检查后不得发请求");
+  sandbox.chrome.storage.sync.get = syncGetSaved;
 
   console.log("ok");
 })().catch((error) => {

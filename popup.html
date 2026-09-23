@@ -178,6 +178,13 @@
       min-height: 36px; padding: 7px 10px; border: 1px solid var(--hair); border-radius: 8px;
       background: var(--surface); color: var(--ink); font: inherit; cursor: pointer;
     }
+    .mini-btn {
+      height: 26px; padding: 0 11px; border: 1px solid var(--hair); border-radius: 7px;
+      background: var(--surface); color: var(--ink-2);
+      font: 600 11.5px var(--font); letter-spacing: 0.01em; cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .mini-btn:hover { background: var(--canvas); color: var(--ink); }
     .tool-actions button:hover, #saveGlossary:hover { background: var(--canvas); }
     button:disabled { opacity: 0.6; cursor: wait; }
     details summary { cursor: pointer; font-weight: 600; }
@@ -309,11 +316,29 @@
       </button>
     </div>
 
+    <!-- 版本与更新 -->
+    <div class="section">
+      <div class="section-title">版本与更新</div>
+      <div class="row">
+        <span>当前版本 <span class="badge" id="versionBadge">v?</span></span>
+        <button id="checkUpdateBtn" type="button" class="mini-btn">检查更新</button>
+      </div>
+      <div class="row">
+        <span>每 12 小时自动检查</span>
+        <label class="switch">
+          <input type="checkbox" id="checkUpdates" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <p class="hint" id="updateStatus" role="status"></p>
+    </div>
+
     <div class="foot">
       获取 Key：
       <a href="https://platform.deepseek.com" target="_blank" rel="noopener">DeepSeek</a> ·
       <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">OpenRouter</a> ·
-      <a href="https://cloud.siliconflow.cn" target="_blank" rel="noopener">硅基流动</a>
+      <a href="https://cloud.siliconflow.cn" target="_blank" rel="noopener">硅基流动</a> ·
+      <a href="https://github.com/joyiok/chinese-english-helper" target="_blank" rel="noopener">GitHub</a>
     </div>
   </div>
 
