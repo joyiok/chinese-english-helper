@@ -528,7 +528,7 @@
 .zhenyi-workbench { width: min(480px, calc(100vw - 24px)); top: 24px; right: 12px; max-height: calc(100vh - 48px); }
 .zhenyi-workbench *, .zhenyi-workbench *::before, .zhenyi-workbench *::after { box-sizing: border-box; }
 .zhenyi-workbench [hidden] { display: none !important; }
-.zhenyi-workbench .zhenyi-explain-head { cursor: default; }
+.zhenyi-workbench .zhenyi-explain-head { cursor: grab; }
 .zhenyi-work-body { display: grid; gap: 14px; background: var(--zy-surface); }
 .zhenyi-work-body label { display: grid; gap: 6px; color: var(--zy-ink-2); font-size: 12px; font-weight: 600; }
 .zhenyi-workbench textarea, .zhenyi-workbench select, .zhenyi-workbench input {
@@ -594,7 +594,7 @@
 .zhenyi-pagebar-toggle {
   display: inline-flex; align-items: center; gap: 6px;
   min-width: 34px; height: 34px; padding: 0 11px;
-  border: 0; border-radius: 999px; cursor: pointer;
+  border: 0; border-radius: 999px; cursor: grab;
   background: var(--zy-ink); color: var(--zy-surface);
   font: 600 13px/1 var(--zy-font); box-shadow: var(--zy-shadow-sm);
 }

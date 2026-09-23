@@ -118,6 +118,67 @@
 
   const hasCJK = (s) => /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/.test(s);
 
+  /* ---------------- 浮层拖动：按住标题栏/圆片即可移动，边界收敛不出屏 ----------------
+   * 位置统一用 inline style（CSP 安全惯例：显示/隐藏用 class，位置用 inline style）。
+   * threshold：移动超过该距离才算拖动，阈值内的微小移动不吞点击。
+   * 拖动结束后 300ms 内的 click 属于同一次手势，由调用方自行忽略。 */
+  function makeDraggable(el, handle, opts = {}) {
+    const threshold = opts.threshold || 0;
+    let press = null;
+
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    function anchor() {
+      if (!press || press.anchored) return;
+      const rect = el.getBoundingClientRect();
+      el.style.left = rect.left + "px";
+      el.style.top = rect.top + "px";
+      el.style.right = "auto";
+      el.style.bottom = "auto";
+      el.style.margin = "0";
+      press.dx = press.x - rect.left;
+      press.dy = press.y - rect.top;
+      press.anchored = true;
+    }
+
+    const onMove = (e) => {
+      if (!press) return;
+      if (!press.moved) {
+        if (Math.abs(e.clientX - press.x) < threshold && Math.abs(e.clientY - press.y) < threshold) return;
+        press.moved = true;
+        anchor();
+        el.style.userSelect = "none";
+      }
+      const vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+      const w = el.offsetWidth || 0;
+      // 边界收敛：拖不丢——横竖都至少留 60px 在屏内
+      el.style.left = clamp(e.clientX - press.dx, 60 - w, vw - 60) + "px";
+      el.style.top = clamp(e.clientY - press.dy, 0, vh - 44) + "px";
+    };
+
+    const onUp = () => {
+      if (!press) return;
+      const moved = press.moved;
+      press = null;
+      window.removeEventListener("mousemove", onMove, true);
+      window.removeEventListener("mouseup", onUp, true);
+      el.style.userSelect = "";
+      if (moved && opts.onDragEnd) opts.onDragEnd();
+    };
+
+    handle.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || !e.isTrusted || !el.isConnected) return;
+      if (opts.skip && e.target && e.target.closest && e.target.closest(opts.skip)) return;
+      press = { x: e.clientX, y: e.clientY, dx: 0, dy: 0, moved: false, anchored: false };
+      if (threshold === 0) {
+        anchor();
+        e.preventDefault();   // 立即拖动：防止标题栏选中文本
+      }
+      window.addEventListener("mousemove", onMove, true);
+      window.addEventListener("mouseup", onUp, true);
+    });
+  }
+
   /* ---------------- 样式注入 ---------------- */
   const btn = document.createElement("button");
   btn.type = "button";
@@ -134,8 +195,13 @@
 
   const bubble = document.createElement("div");
   bubble.className = "zhenyi-bubble";
-  bubble.innerHTML = '<div class="zhenyi-bubble-body"></div><div class="zhenyi-bubble-foot"></div>';
+  bubble.innerHTML = '<div class="zhenyi-bubble-body"></div><div class="zhenyi-bubble-actions"></div><div class="zhenyi-bubble-foot"></div>';
   document.documentElement.appendChild(bubble);
+  let bubbleDraggedAt = 0;
+  makeDraggable(bubble, bubble, {
+    threshold: 5,   // 阈值内的小移动仍是点击（复制译文），不吞
+    onDragEnd: () => { bubbleDraggedAt = Date.now(); },
+  });
 
   document.documentElement.appendChild(btn);
 
@@ -481,6 +547,7 @@
         placeBubble();   // 结果比“翻译中…”更高，重新收敛
         const body = bubble.querySelector(".zhenyi-bubble-body");
         body.onclick = () => {
+          if (Date.now() - bubbleDraggedAt < 300) return;   // 刚拖完：这个 click 属于拖动手势
           navigator.clipboard && navigator.clipboard.writeText(out);
           bubble.querySelector(".zhenyi-bubble-foot").textContent = "已复制";
         };
@@ -665,6 +732,7 @@
       '<div data-part="offer-result" hidden></div>' +
       '</div><div class="zhenyi-work-actions"><button type="button" data-act="copy" disabled>复制结果</button><button type="button" data-act="undo" disabled>还原原文</button><button type="button" class="zhenyi-work-primary" data-act="apply" disabled>确认替换</button></div>';
     document.documentElement.appendChild(panel);
+    makeDraggable(panel, panel.querySelector(".zhenyi-explain-head"), { skip: "button" });   // 标题栏可拖动，按钮不触发
     const field = name => panel.querySelector('[data-field="' + name + '"]');
     const part = name => panel.querySelector('[data-part="' + name + '"]');
     const action = name => panel.querySelector('[data-act="' + name + '"]');
@@ -1539,6 +1607,7 @@
       '  <button class="zhenyi-explain-send" title="发送 (Enter)">发送</button>' +
       '</div>';
     document.documentElement.appendChild(panel);
+    makeDraggable(panel, panel.querySelector(".zhenyi-explain-head"), { skip: "button" });
 
     panel.querySelector(".zhenyi-explain-close").onclick = () => {
       panel.remove();
@@ -1717,6 +1786,7 @@
 
   let pageBlocked = new WeakSet();   // 已经建过翻译单元的元素
   let pageOwnDone = new WeakSet();   // 元素自有的直接文本已处理（子元素仍可继续变化）
+  let pagebarDraggedAt = 0;          // 小圆片拖动结束时间：随后的 click 属于同一手势
   const pageState = {
     active: false, stopped: false, target: "zh-CN", mode: "replace",
     records: [], byEl: new Map(), parts: new Map(), queue: [], inflight: 0,
@@ -2112,6 +2182,7 @@
       if (e.isTrusted && isCurrent()) fn();
     });
     on("toggle", () => {
+      if (Date.now() - pagebarDraggedAt < 300) return;   // 刚拖完：这个 click 不算展开/收起
       pageState.expanded = !pageState.expanded;
       bar.classList.toggle("zhenyi-collapsed", !pageState.expanded);
       bar.querySelector('[data-page="toggle"]').setAttribute("aria-expanded", String(pageState.expanded));
@@ -2140,6 +2211,10 @@
     on("mode", () => {
       if (!pageState.active) return;
       setPageMode(pageState.mode === "bilingual" ? "replace" : "bilingual");
+    });
+    makeDraggable(bar, bar.querySelector('[data-page="toggle"]'), {
+      threshold: 5,   // 阈值内仍是点击（展开/收起）
+      onDragEnd: () => { pagebarDraggedAt = Date.now(); },
     });
     return bar;
   }

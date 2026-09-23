@@ -1053,6 +1053,69 @@ function selectionSender(env, el) {
   assert.equal(panel29.querySelector('[data-act="term"]').hidden, true, "写回复模式不显示存术语");
   env.window.close();
 
+  /* 30. 浮层可拖动：标题栏拖动改变位置、边界收敛不出屏；按钮不触发；拖后功能不变。 */
+  env = boot();
+  env.doc.body.innerHTML = '<textarea id="ta">拖动测试</textarea>';
+  env.send({ type: "OPEN_WORKBENCH", mode: "translate" });
+  const dragPanel = env.doc.querySelector(".zhenyi-workbench");
+  const dragHead = dragPanel.querySelector(".zhenyi-explain-head");
+  env.userEvent(dragHead, "mousedown", { clientX: 300, clientY: 100, button: 0, target: dragHead });
+  env.userEvent(env.window, "mousemove", { clientX: 260, clientY: 160, target: dragHead });
+  env.userEvent(env.window, "mouseup", { clientX: 260, clientY: 160, target: dragHead });
+  assert.equal(dragPanel.style.right, "auto", "拖动后应解除 right 锚定");
+  assert.equal(dragPanel.style.left, "60px", "位置应随拖动更新");
+  assert.equal(dragPanel.style.top, "60px");
+  env.userEvent(dragHead, "mousedown", { clientX: 100, clientY: 100, button: 0, target: dragHead });
+  env.userEvent(env.window, "mousemove", { clientX: 3000, clientY: 3000, target: dragHead });
+  env.userEvent(env.window, "mouseup", { clientX: 3000, clientY: 3000, target: dragHead });
+  assert.equal(dragPanel.style.left, "964px", "横向收敛：右侧至少留 60px 在屏内");
+  assert.equal(dragPanel.style.top, "724px", "纵向收敛：底部至少留 44px");
+  const closeBtn30 = dragPanel.querySelector('[data-act="close"]');
+  env.userEvent(closeBtn30, "mousedown", { clientX: 300, clientY: 100, button: 0, target: closeBtn30 });
+  env.userEvent(env.window, "mousemove", { clientX: 400, clientY: 200, target: env.window });
+  env.userEvent(env.window, "mouseup", { clientX: 400, clientY: 200, target: env.window });
+  assert.equal(dragPanel.style.left, "964px", "标题栏按钮上的按下不得拖动");
+  env.userEvent(closeBtn30, "click");
+  assert.equal(env.doc.querySelector(".zhenyi-workbench"), null, "拖动后关闭按钮仍应工作");
+  env.window.close();
+
+  /* 31. 气泡可拖动：阈值内小移动仍是点击（复制）；拖完的 click 不误复制，稍后再点恢复复制。 */
+  env = boot({ selMode: "direct" });
+  env.doc.body.innerHTML = "<p>Drag bubble test text.</p>";
+  const sender31 = selectionSender(env, env.doc.querySelector("p"));
+  sender31("Drag bubble test text.");
+  await wait(30);
+  const dragBubble = env.doc.querySelector(".zhenyi-bubble");
+  const dragBody = dragBubble.querySelector(".zhenyi-bubble-body");
+  env.userEvent(dragBubble, "mousedown", { clientX: 200, clientY: 200, button: 0, target: dragBody });
+  env.userEvent(env.window, "mousemove", { clientX: 240, clientY: 250, target: dragBody });
+  env.userEvent(env.window, "mouseup", { clientX: 240, clientY: 250, target: dragBody });
+  assert.equal(dragBubble.style.left, "60px", "气泡应随拖动移动");
+  assert.equal(dragBubble.style.top, "50px");
+  env.userEvent(dragBody, "click", { target: dragBody });
+  assert.doesNotMatch(env.doc.querySelector(".zhenyi-bubble-foot").textContent, /已复制/, "拖完的 click 不得触发复制");
+  await wait(350);
+  env.userEvent(dragBody, "click", { target: dragBody });
+  assert.match(env.doc.querySelector(".zhenyi-bubble-foot").textContent, /已复制/, "稍后点击应恢复复制");
+  env.window.close();
+
+  /* 32. 小圆片可拖动：拖完的 click 不算展开，纯点击仍展开。 */
+  env = boot();
+  env.doc.body.innerHTML = "<p>Drag the pagebar chip.</p>";
+  env.send({ type: "TRANSLATE_PAGE", target: "zh-CN" });
+  await wait(40);
+  const dragBar = pagebarOf(env);
+  const dragChip = dragBar.querySelector('[data-page="toggle"]');
+  env.userEvent(dragChip, "mousedown", { clientX: 900, clientY: 700, button: 0, target: dragChip });
+  env.userEvent(env.window, "mousemove", { clientX: 700, clientY: 500, target: dragChip });
+  env.userEvent(env.window, "mouseup", { clientX: 700, clientY: 500, target: dragChip });
+  assert.ok(dragBar.style.left.endsWith("px"), "小圆片拖动后转为 left/top 定位");
+  assert.equal(dragBar.classList.contains("zhenyi-collapsed"), true, "拖动不得触发展开");
+  await wait(350);
+  env.userEvent(dragChip, "click", { target: dragChip });
+  assert.equal(dragBar.classList.contains("zhenyi-collapsed"), false, "纯点击仍可展开");
+  env.window.close();
+
   console.log("content ok");
 })().catch((error) => {
   console.error(error);
