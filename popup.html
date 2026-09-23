@@ -5,15 +5,17 @@
   <style>
     /* 视觉方向：克制精确（近黑白 + 一处强调蓝）。控件、字体、间距统一走这里定义的变量。 */
     :root {
-      --ink: #0e0f12;
+      --ink: #101114;
       --ink-2: #3d4148;
-      --ink-3: #666b76;
-      --hair: rgba(14, 15, 18, 0.09);
-      --hair-2: rgba(14, 15, 18, 0.06);
+      --ink-3: #6a707d;
+      --hair: rgba(16, 17, 20, 0.1);
+      --hair-2: rgba(16, 17, 20, 0.06);
       --surface: #ffffff;
-      --canvas: #f6f6f5;
+      --canvas: #f5f5f4;
       --accent: #3355d1;
-      --accent-soft: rgba(51, 85, 209, 0.12);
+      --accent-2: #2a48a8;
+      --accent-soft: rgba(51, 85, 209, 0.1);
+      --accent-line: rgba(51, 85, 209, 0.38);
       --ok: #1f7a4d;
       --err: #b42318;
       --font: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -22,7 +24,7 @@
 
     * { box-sizing: border-box; }
     body {
-      width: 312px;
+      width: 320px;
       margin: 0;
       font-family: var(--font);
       font-size: 13px;
@@ -34,7 +36,7 @@
     ::selection { background: var(--accent-soft); }
     ::-webkit-scrollbar { width: 8px; }
     ::-webkit-scrollbar-thumb {
-      background: rgba(14, 15, 18, 0.16);
+      background: rgba(16, 17, 20, 0.16);
       border-radius: 99px;
       border: 2px solid transparent;
       background-clip: content-box;
@@ -42,35 +44,42 @@
     ::-webkit-scrollbar-track { background: transparent; }
     :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
 
-    /* ---- 头部 ---- */
+    /* ---- 头部：深色渐变带，Logo 用强调蓝 ---- */
     .header {
-      display: flex; align-items: center; gap: 10px;
-      padding: 12px 14px;
-      background: var(--surface);
-      border-bottom: 1px solid var(--hair);
+      display: flex; align-items: center; gap: 11px;
+      padding: 13px 16px;
+      background: linear-gradient(150deg, #14161b 0%, #1e2129 60%, #262a37 100%);
+      color: #fff;
     }
     .logo {
-      width: 30px; height: 30px; flex-shrink: 0;
+      width: 32px; height: 32px; flex-shrink: 0;
       display: flex; align-items: center; justify-content: center;
-      background: var(--ink);
+      background: linear-gradient(160deg, #4d6cf0, #2b48b8);
       color: #fff;
-      border-radius: 8px;
-      font-size: 14px; font-weight: 600;
+      border-radius: 9px;
+      font-size: 15px; font-weight: 600;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 2px 5px rgba(0, 0, 0, 0.28);
     }
-    .header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
-    .header .sub { margin: 2px 0 0; font-size: 12px; color: var(--ink-3); }
+    .header h1 { font-size: 13.5px; margin: 0; font-weight: 600; color: #fff; letter-spacing: -0.01em; }
+    .header .sub { margin: 2px 0 0; font-size: 11px; color: rgba(255, 255, 255, 0.55); }
     .header .switch { margin-left: auto; }
+    .header .slider { background: rgba(255, 255, 255, 0.24); }
 
     /* ---- 主体：白色纸张 + 发丝分隔线，无卡片 ---- */
     .body { display: flex; flex-direction: column; }
-    .section { padding: 12px 14px; border-top: 1px solid var(--hair-2); }
+    .section { padding: 12px 16px; border-top: 1px solid var(--hair-2); }
     .section:first-child { border-top: 0; }
     .section-title {
-      font-size: 12px; font-weight: 600; color: var(--ink-3);
-      letter-spacing: 0.08em; margin-bottom: 7px;
+      display: flex; align-items: center; gap: 7px;
+      font-size: 11px; font-weight: 600; color: var(--ink-3);
+      letter-spacing: 0.1em; margin-bottom: 8px;
+    }
+    .section-title::before {
+      content: ""; width: 3px; height: 11px; border-radius: 2px;
+      background: var(--accent); opacity: 0.6; flex-shrink: 0;
     }
 
-    .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; }
     .row > span { display: flex; align-items: center; gap: 7px; font-size: 12.5px; min-width: 0; }
     .row + .row { border-top: 1px solid var(--hair-2); }
 
@@ -81,7 +90,7 @@
       transition: border-color 0.15s, box-shadow 0.15s;
       font-family: inherit;
     }
-    select { max-width: 170px; }
+    select { max-width: 178px; }
     select:focus, input:focus {
       border-color: var(--accent);
       box-shadow: 0 0 0 3px var(--accent-soft);
@@ -91,8 +100,8 @@
     .ai-box {
       display: none; margin-top: 8px;
       background: var(--canvas);
-      border: 1px solid var(--hair-2); border-radius: 10px;
-      padding: 10px;
+      border: 1px solid var(--hair-2); border-radius: 11px;
+      padding: 11px;
     }
     .ai-box.show { display: block; }
     .field { margin-bottom: 9px; }
@@ -107,7 +116,7 @@
     .hint a:hover { text-decoration: underline; text-underline-offset: 2px; }
     .badge {
       display: inline-flex; align-items: center; white-space: nowrap;
-      font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 6px;
+      font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 6px;
       background: var(--canvas); color: var(--ink-2); border: 1px solid var(--hair-2);
     }
     kbd {
@@ -127,30 +136,56 @@
       left: 3px; top: 3px; background: #fff; border-radius: 50%;
       transition: transform 0.18s ease; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
     }
-    input:checked + .slider { background: var(--ink); }
+    input:checked + .slider { background: var(--accent); }
     input:checked + .slider:before { transform: translateX(16px); }
+    .header .slider:before { background: #fff; }
 
-    /* ---- 主按钮 ---- */
+    /* ---- 主操作：整页翻译（深色实心） ---- */
     .cta {
-      width: 100%; border: 1px solid var(--ink); cursor: pointer;
-      height: 38px; border-radius: 10px;
+      width: 100%; border: none; cursor: pointer;
+      height: 42px; border-radius: 11px;
       font-size: 13px; font-weight: 600; color: #fff;
       font-family: inherit; letter-spacing: 0.01em;
-      background: var(--ink);
-      display: flex; align-items: center; justify-content: center; gap: 7px;
-      transition: background 0.15s, border-color 0.15s, transform 0.12s;
+      background: linear-gradient(160deg, #26292f, #121317);
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      box-shadow: 0 1px 2px rgba(16, 17, 20, 0.2);
+      transition: filter 0.15s, transform 0.12s;
     }
-    .cta:hover { background: #23252b; border-color: #23252b; }
+    .cta:hover { filter: brightness(1.18); }
     .cta:active { transform: translateY(1px); }
     .cta svg { flex-shrink: 0; }
 
+    /* ---- 次操作：两列按钮 ---- */
+    .tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+    .tool-btn {
+      min-height: 40px; padding: 7px 10px; border: 1px solid var(--hair); border-radius: 10px;
+      background: var(--surface); color: var(--ink); font: 600 12.5px var(--font);
+      display: flex; align-items: center; justify-content: center; gap: 7px;
+      cursor: pointer; letter-spacing: 0.01em;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .tool-btn:hover { background: var(--canvas); border-color: rgba(16, 17, 20, 0.17); }
+    .tool-btn svg { flex-shrink: 0; color: var(--accent); opacity: 0.85; }
+
+    /* ---- AI 操作：蓝色描边 ---- */
+    .ai-cta {
+      width: 100%; height: 38px; cursor: pointer;
+      border: 1px solid var(--accent-line); border-radius: 10px;
+      background: var(--accent-soft); color: var(--accent-2);
+      font: 600 12.5px var(--font); letter-spacing: 0.01em;
+      display: flex; align-items: center; justify-content: center; gap: 7px;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .ai-cta:hover { background: rgba(51, 85, 209, 0.16); border-color: var(--accent); }
+    .ai-cta svg { flex-shrink: 0; }
+
     .foot {
-      text-align: center; font-size: 12px; color: var(--ink-3);
-      padding: 2px 14px 12px;
+      text-align: center; font-size: 11.5px; color: var(--ink-3);
+      padding: 4px 16px 13px;
     }
     .foot a {
       color: var(--ink-2); text-decoration: none;
-      border-bottom: 1px solid rgba(14, 15, 18, 0.2); padding-bottom: 1px;
+      border-bottom: 1px solid rgba(16, 17, 20, 0.2); padding-bottom: 1px;
     }
     .foot a:hover { color: var(--ink); border-color: var(--ink); }
 
@@ -159,7 +194,7 @@
       display: flex; align-items: center; gap: 8px;
       font-size: 11.5px;
       padding: 9px 12px;
-      border-radius: 9px;
+      border-radius: 10px;
       background: var(--canvas);
       color: var(--ink-2);
       border: 1px solid var(--hair-2);
@@ -173,24 +208,22 @@
     .tab-status.bad { color: var(--err); }
     .tab-status.bad::before { background: var(--err); }
     .tab-status a { color: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
-    .tool-actions { display: grid; gap: 8px; }
-    .tool-actions button, #saveGlossary {
-      min-height: 36px; padding: 7px 10px; border: 1px solid var(--hair); border-radius: 8px;
-      background: var(--surface); color: var(--ink); font: inherit; cursor: pointer;
-    }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    details summary { cursor: pointer; font-weight: 600; font-size: 12.5px; }
+    details summary::marker { color: var(--ink-3); }
+    #glossary { width: 100%; min-height: 120px; padding: 9px; resize: vertical; border: 1px solid var(--hair); border-radius: 8px; font: 12px/1.6 var(--font); }
+    #glossary:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    #glossaryStatus { white-space: pre-wrap; }
+    .hint.error { color: var(--err); }
     .mini-btn {
-      height: 26px; padding: 0 11px; border: 1px solid var(--hair); border-radius: 7px;
+      height: 27px; padding: 0 11px; border: 1px solid var(--hair); border-radius: 8px;
       background: var(--surface); color: var(--ink-2);
       font: 600 11.5px var(--font); letter-spacing: 0.01em; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 5px;
       transition: background 0.15s, color 0.15s;
     }
     .mini-btn:hover { background: var(--canvas); color: var(--ink); }
-    .tool-actions button:hover, #saveGlossary:hover { background: var(--canvas); }
-    button:disabled { opacity: 0.6; cursor: wait; }
-    details summary { cursor: pointer; font-weight: 600; }
-    #glossary { width: 100%; min-height: 120px; padding: 9px; resize: vertical; border: 1px solid var(--hair); border-radius: 8px; font: 12px/1.6 var(--font); }
-    #glossaryStatus { white-space: pre-wrap; }
-    .hint.error { color: var(--err); }
+    .mini-btn svg { flex-shrink: 0; }
   </style>
 </head>
 <body>
@@ -211,11 +244,31 @@
       <div id="tabStatus" class="tab-status">正在检测当前页面…</div>
     </div>
 
-    <div class="section tool-actions">
-      <button id="replyBtn" type="button">写回复 · 译文预览 · 查漏</button>
-      <button id="offerBtn" type="button">提取关键信息</button>
-      <button id="pageBtn" type="button">翻译整个页面</button>
-      <p class="hint" id="toolStatus" role="status">选中对方的话后右键，也可直接写回复。AI 功能需配置 Key。</p>
+    <div class="section">
+      <button id="pageBtn" class="cta" type="button">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="8" cy="8" r="6.2" />
+          <path d="M1.8 8h12.4" />
+          <path d="M8 1.8C10.2 3.5 11.3 5.6 11.3 8S10.2 12.5 8 14.2C5.8 12.5 4.7 10.4 4.7 8S5.8 3.5 8 1.8Z" />
+        </svg>
+        翻译整个页面
+      </button>
+      <div class="tool-grid">
+        <button id="replyBtn" class="tool-btn" type="button">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2.5 3.2h11v7.3H7.8L4.6 13v-2.5H2.5z" />
+          </svg>
+          写回复 · 查漏
+        </button>
+        <button id="offerBtn" class="tool-btn" type="button">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="6.7" cy="6.7" r="4.2" />
+            <path d="M10 10l3.3 3.3" />
+          </svg>
+          提取要点
+        </button>
+      </div>
+      <p class="hint" id="toolStatus" role="status">写回复含译文预览与发送前查漏；选中文字后右键也能用。AI 功能需配置 Key。</p>
     </div>
 
     <!-- 翻译引擎 -->
@@ -275,18 +328,19 @@
       </div>
     </div>
 
-    <!-- 快捷方式 -->
+    <!-- 个人术语表 -->
     <div class="section">
       <details>
         <summary>个人术语表</summary>
         <p class="hint" id="glossaryHelp">每行一条：中文 = English。中英互译自动反向应用；如需保留原词，填写 VPS = VPS。最多 100 条，仅保存在本机。</p>
         <label for="glossary">固定译法</label>
         <textarea id="glossary" maxlength="12000" aria-describedby="glossaryHelp" placeholder="续费价 = renewal price&#10;流量 = bandwidth&#10;VPS = VPS"></textarea>
-        <button id="saveGlossary" type="button">保存术语表</button>
+        <button id="saveGlossary" class="tool-btn" type="button" style="width: 100%; margin-top: 8px;">保存术语表</button>
         <p id="glossaryStatus" class="hint" role="status"></p>
       </details>
     </div>
 
+    <!-- 快捷方式 -->
     <div class="section">
       <div class="section-title">快捷方式</div>
       <div class="row">
@@ -306,8 +360,9 @@
       </div>
     </div>
 
+    <!-- AI 看屏幕 -->
     <div class="section">
-      <button id="explainBtn" class="cta">
+      <button id="explainBtn" class="ai-cta" type="button">
         <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M1.6 8S4 4.2 8 4.2 14.4 8 14.4 8 12 11.8 8 11.8 1.6 8 1.6 8z" />
           <circle cx="8" cy="8" r="1.7" />
@@ -321,7 +376,13 @@
       <div class="section-title">版本与更新</div>
       <div class="row">
         <span>当前版本 <span class="badge" id="versionBadge">v?</span></span>
-        <button id="checkUpdateBtn" type="button" class="mini-btn">检查更新</button>
+        <button id="checkUpdateBtn" type="button" class="mini-btn">
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M13.1 8A5.1 5.1 0 1 1 11.6 4.3" />
+            <path d="M13.3 1.8v3h-3" />
+          </svg>
+          检查更新
+        </button>
       </div>
       <div class="row">
         <span>每 12 小时自动检查</span>
